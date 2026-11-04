@@ -164,7 +164,7 @@ fn parse_responses_input(req: &Value) -> (Option<IrSystemContent>, Vec<IrMessage
             // type 可缺省（Responses 规范中为可选字段）：裸 {role, content}
             // 即合法 message——缺省/空值必须按消息处理，否则整段对话被
             // 静默丢弃、上游收到空 input（Bug：上游 502 极难排查）。
-            "message" | "" => {
+            "message" | "" | "user" | "assistant" | "system" | "developer" => {
                 let ir_role = match role {
                     "system" => {
                         // System 消息
@@ -199,6 +199,8 @@ fn parse_responses_input(req: &Value) -> (Option<IrSystemContent>, Vec<IrMessage
             }
             "function_call" => {
                 // Function call → ToolUse
+                // call_id 是 function_call_output 回传时的关联键；item 级 id
+                // （fc_*）仅在缺失 call_id 时兜底
                 let id = item
                     .get("call_id")
                     .or_else(|| item.get("id"))
@@ -255,6 +257,29 @@ fn parse_responses_input(req: &Value) -> (Option<IrSystemContent>, Vec<IrMessage
                         is_error,
                     }],
                 });
+            }
+            // 顶层 reasoning output item：文本在 summary[].text（summary_text），
+            // content[].text（reasoning_text）为兼容旧客户端
+            "reasoning" => {
+                let mut text = String::new();
+                for key in ["summary", "content"] {
+                    if let Some(parts) = item.get(key).and_then(|v| v.as_array()) {
+                        for p in parts {
+                            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+                if !text.is_empty() {
+                    messages.push(IrMessage {
+                        role: IrRole::Assistant,
+                        content: vec![IrContentBlock::Thinking {
+                            thinking: text,
+                            signature: None,
+                        }],
+                    });
+                }
             }
             other => {
                 // 无法识别的条目记 warn 而非静默丢弃——客户端（尤其第三方
@@ -584,7 +609,7 @@ pub fn responses_chunk_to_ir(
             }
         }
 
-        "response.reasoning.delta" => {
+        "response.reasoning.delta" | "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
             // Reasoning 增量
             if let Some(delta) = chunk.get("delta").and_then(|v| v.as_str()) {
                 if !state.thinking_ever_started {
@@ -672,6 +697,11 @@ pub fn responses_chunk_to_ir(
                 usage: Some(state.usage.clone()),
             });
             events.push(IrStreamEvent::MessageStop);
+        }
+
+        // 上游报错事件：记录而非静默丢弃，便于排查「流已完成但内容不对」
+        "response.failed" | "error" => {
+            tracing::warn!(event = %event_type, payload = %chunk, "upstream Responses stream error event");
         }
 
         _ => {}
@@ -838,6 +868,31 @@ mod tests {
         let ir3 = responses_req_to_ir(&req3);
         assert!(matches!(ir3.system, Some(IrSystemContent::Text(ref t)) if t == "Be brief."));
         assert_eq!(ir3.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_reasoning_item_input() {
+        // 客户端回传的 reasoning output item（summary_text）应还原为 Thinking
+        let req = json!({
+            "model": "gpt-4o",
+            "input": [
+                {"type": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "thinking"}]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}]
+                }
+            ]
+        });
+        let ir = responses_req_to_ir(&req);
+        assert_eq!(ir.messages.len(), 3);
+        assert_eq!(ir.messages[1].role, IrRole::Assistant);
+        assert!(matches!(&ir.messages[1].content[0], IrContentBlock::Thinking { thinking, .. } if thinking == "thinking"));
     }
 
     #[test]

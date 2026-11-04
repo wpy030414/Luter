@@ -1257,3 +1257,48 @@ ADR-056 之后，单页抓取已经「静态优先 + 按需渲染 + 缓存 + 分
 - `src-tauri/src/gateway/server.rs`、`src-tauri/src/api/handlers/stats.rs`（开关持久化）
 - `src/views/SettingsView.tsx` + `src/i18n/*`
 - `docs/specs/module-mcp-tools.md`
+
+---
+
+## ADR-059：Responses 工具调用往返与 reasoning item 规范
+
+**日期**: 2026-11-04
+**状态**: 已采纳
+
+### 背景
+
+客户端经 `/v1/responses` 接入上游 Messages/Chat 时，严格实现（如 Codex）报
+`OpenAI Responses stream completed with an unfinished tool call: pwsh (call_xxx|item_xxx)`。
+排查发现 IR 在 Responses 方向上有三处不符合规范：
+
+1. `to_responses` 流式渲染的 `function_call` item **没有 `id` 字段**，而 `call_id`
+   直接复用上游 `tool_use.id`；
+2. 客户端回传 `call_id|item_id` 形式时，`from_responses` 拿整个字符串当 ToolUse id，
+   与 assistant 侧 ToolUse 的 id 对不上，工具调用关联断裂；
+3. Thinking 被渲染为 `message.content` 里的 `{"type":"reasoning"}` part，且顺序被挪到
+   文本之后；输入侧也没有解析顶层 `reasoning` output item。
+
+### 决策
+
+1. **ID 双轨**：function_call item 的 `id` 与 `call_id` 由 IR 渲染层各自生成
+   （`fc_*` / `call_*`），added 与 done 事件保持一致。输入侧 `to_responses` 用 IR
+   `tool_use.id` 回填 `call_id` 并补齐 `id`，形成闭环。
+2. **input part 按 type 解析**：顶层 input item 的 `type` 为 `user`/`assistant`/`system`/
+   `developer` 时同样按 message 处理（不再静默丢弃）。
+3. **reasoning 独立 output item**：Thinking 渲染为 `{"type":"reasoning","summary":
+   [{"type":"summary_text"}]}`，位于 message / function_call 之前；输入侧解析
+   topology `reasoning` item 的 `summary[].text`（兼容 `content[].text`）还原为 Thinking。
+4. **流式思考事件名兼容**：上游 `response.reasoning_text.delta` /
+   `response.reasoning_summary_text.delta` 与 `response.reasoning.delta` 一同映射为
+   ThinkingDelta；`response.failed` / `error` 事件记 warn 日志。
+
+### 代价
+
+- 上游 tool_use id 不再原样出现在 Responses 输出中；若更新 provider 侧需要原始 id
+  对应，只能靠同一次请求内的顺序，跨请求无法复原。对网关场景无影响。
+
+### 相关文件
+
+- `src-tauri/src/api/proxy/ir/to_responses.rs`
+- `src-tauri/src/api/proxy/ir/from_responses.rs`
+- `docs/specs/module-protocol-translation.md`

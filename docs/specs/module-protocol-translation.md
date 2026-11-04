@@ -76,7 +76,7 @@ pub struct IrUsage {
 |------|------|---------|
 | `from_messages.rs` | Anthropic Messages | server-side `web_search_*` 工具归一化为 `name="web_search"` |
 | `from_chat_completions.rs` | OpenAI Chat Completions | `reasoning_content` → `Thinking` 块 |
-| `from_responses.rs` | OpenAI Responses API | `input` → `messages`，`response.completed` 事件解析 |
+| `from_responses.rs` | OpenAI Responses API | `input` → `messages`（按 `type` 分发，含 `reasoning` item），`response.completed` 事件解析 |
 
 ### to_*.rs（IR → 客户端格式）
 
@@ -84,7 +84,7 @@ pub struct IrUsage {
 |------|------|---------|
 | `to_messages.rs` | Anthropic Messages | `message_delta.usage` 补上 `input_tokens` |
 | `to_chat_completions.rs` | OpenAI Chat Completions | `Thinking` → `reasoning_content` |
-| `to_responses.rs` | OpenAI Responses API | IR → Responses output items |
+| `to_responses.rs` | OpenAI Responses API | IR → Responses output items；function_call 的 `id`/`call_id` 由本层生成 |
 
 ### usage.rs（token 提取）
 
@@ -107,9 +107,9 @@ pub struct IrUsage {
 |------|--------------------|-------------------------|-----------------|
 | 文本消息 | ✅ text block | ✅ content string | ✅ input/output text |
 | 系统提示 | ✅ system 顶层 | ✅ role:system | ✅ instructions |
-| 工具调用 | ✅ tool_use block | ✅ tool_calls | ✅ function_call |
+| 工具调用 | ✅ tool_use block | ✅ tool_calls | ✅ function_call（`id`=`fc_*` + `call_id`=`call_*`） |
 | 工具结果 | ✅ tool_result block | ✅ role:tool | ✅ function_call_output |
-| 思考过程 | ✅ thinking block | ⚠️ reasoning_content | ⚠️ reasoning |
+| 思考过程 | ✅ thinking block | ⚠️ reasoning_content | ✅ reasoning output item（summary_text，往返保留） |
 | 工具选择 | ✅ tool_choice | ✅ tool_choice | ✅ tool_choice |
 | 流式响应 | ✅ SSE 6 事件 | ✅ SSE choices | ✅ SSE response.* |
 | 缓存 token | ✅ cache_read | ❌ | ✅ input_tokens_details |
@@ -122,6 +122,7 @@ pub struct IrUsage {
 3. **错误容忍**: 单个 chunk 转换失败不影响整个流
 4. **thinking 字段**: thinking/reasoning_content 双向转换，内容原样传递（无截断）
 5. **usage 真实值覆盖**: 上游真实 usage 覆盖 `forward.rs` 预填的估算占位
+6. **Responses 工具调用**: function_call item 的 `id`（`fc_*`）与 `call_id`（`call_*`）都由渲染层生成，added/done 一致；对应上游 tool_use id 不回传（见 ADR-059）
 
 ## 错误处理
 
