@@ -57,6 +57,7 @@ pub fn ir_req_to_responses(req: &IrRequest) -> Value {
         let mut text_parts: Vec<Value> = vec![];
         let mut function_calls: Vec<Value> = vec![];
         let mut function_outputs: Vec<Value> = vec![];
+        let mut reasoning_items: Vec<Value> = vec![];
 
         for block in &msg.content {
             match block {
@@ -73,7 +74,12 @@ pub fn ir_req_to_responses(req: &IrRequest) -> Value {
                     }
                 },
                 IrContentBlock::Thinking { thinking, .. } => {
-                    text_parts.push(json!({"type": "reasoning", "text": thinking}));
+                    // 规范形态：reasoning 是独立 output item，文本放 summary 数组，
+                    // 不是 message.content 里的 part（此前顺序被挪进 message，往返丢失）
+                    reasoning_items.push(json!({
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": thinking}]
+                    }));
                 }
                 IrContentBlock::ToolUse { id, name, input: args } => {
                     function_calls.push(json!({
@@ -114,6 +120,11 @@ pub fn ir_req_to_responses(req: &IrRequest) -> Value {
                     function_outputs.push(output_obj);
                 }
             }
+        }
+
+        // 添加 reasoning items（排在 message / function_call 之前，保持原顺序）
+        for ri in reasoning_items {
+            input.push(ri);
         }
 
         // 添加 message（如果有文本/图像内容）
@@ -315,7 +326,7 @@ impl ResponsesRenderState {
                         self.content_part_index = 0;
                         self.current_block = Some(ResponsesBlockKind::Text);
                         self.current_text = String::new();
-                        let item_id = format!("item_{}", uuid::Uuid::new_v4().simple());
+                        let item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
                         self.current_item_id = item_id.clone();
                         let part_id = format!("part_{}", uuid::Uuid::new_v4().simple());
 
@@ -362,7 +373,7 @@ impl ResponsesRenderState {
                         self.current_block = Some(ResponsesBlockKind::Thinking);
                         self.current_text = String::new();
                         self.summary_part_started = false;
-                        let item_id = format!("item_{}", uuid::Uuid::new_v4().simple());
+                        let item_id = format!("rs_{}", uuid::Uuid::new_v4().simple());
                         self.current_item_id = item_id.clone();
 
                         // reasoning item 带 content（推理过程文本按规范放在
@@ -390,8 +401,15 @@ impl ResponsesRenderState {
                         self.current_text = String::new();
                         self.current_tool_id = id.clone();
                         self.current_tool_name = name.clone();
-                        let item_id = format!("item_{}", uuid::Uuid::new_v4().simple());
+                        // Responses 协议里 item 级 `id` 与 `call_id` 并存：item id 形如
+                        // `fc_*`，客户端回传 function_call_output 时用 `call_id`。
+                        // 此前把上游 tool_use id 直接当 call_id 且 item 无 id，严格客户端
+                        // （如校验 item_id|call_id 调用状态的 Codex）会判定「unfinished
+                        // tool call」。ID 在本层生成，回传时经 from_responses 映射回 IR。
+                        let item_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
+                        let call_id = format!("call_{}", uuid::Uuid::new_v4().simple());
                         self.current_item_id = item_id.clone();
+                        self.current_tool_id = call_id.clone();
 
                         let added = mk(
                             "response.output_item.added",
@@ -402,7 +420,7 @@ impl ResponsesRenderState {
                                     "id": item_id,
                                     "type": "function_call",
                                     "status": "in_progress",
-                                    "call_id": id,
+                                    "call_id": call_id,
                                     "name": name,
                                     "arguments": ""
                                 }
@@ -506,6 +524,8 @@ impl ResponsesRenderState {
                                 "type": "response.output_item.done",
                                 "output_index": output_index,
                                 "item": {
+                                    "id": self.current_item_id,
+
                                     "type": "message",
                                     "status": "completed",
                                     "role": "assistant",
@@ -519,6 +539,8 @@ impl ResponsesRenderState {
                         );
                         // 记录完整 item（response.completed 的 output 回填）
                         self.completed_items.push(json!({
+                            "id": self.current_item_id,
+
                             "type": "message",
                             "status": "completed",
                             "role": "assistant",
@@ -555,6 +577,8 @@ impl ResponsesRenderState {
                                 "type": "response.output_item.done",
                                 "output_index": output_index,
                                 "item": {
+                                    "id": self.current_item_id,
+
                                     "type": "reasoning",
                                     "status": "completed",
                                     "content": [{
@@ -569,6 +593,8 @@ impl ResponsesRenderState {
                         combined.extend_from_slice(&item_done);
                         // 记录完整 item
                         self.completed_items.push(json!({
+                            "id": self.current_item_id,
+
                             "type": "reasoning",
                             "status": "completed",
                             "content": [{"type": "reasoning_text", "text": reasoning, "summary": []}],
@@ -597,6 +623,7 @@ impl ResponsesRenderState {
                                 "type": "response.output_item.done",
                                 "output_index": output_index,
                                 "item": {
+                                    "id": self.current_item_id,
                                     "type": "function_call",
                                     "status": "completed",
                                     "call_id": self.current_tool_id,
@@ -607,6 +634,7 @@ impl ResponsesRenderState {
                         );
                         // 记录完整 item
                         self.completed_items.push(json!({
+                            "id": self.current_item_id,
                             "type": "function_call",
                             "status": "completed",
                             "call_id": self.current_tool_id,
@@ -694,6 +722,8 @@ impl ResponsesRenderState {
                     }),
                 ));
                 self.completed_items.push(json!({
+                    "id": self.current_item_id,
+
                     "type": "message",
                     "status": "completed",
                     "role": "assistant",
@@ -733,6 +763,8 @@ impl ResponsesRenderState {
                     }),
                 ));
                 self.completed_items.push(json!({
+                    "id": self.current_item_id,
+
                     "type": "reasoning",
                     "status": "completed",
                     "content": [{"type": "reasoning_text", "text": self.current_text, "summary": []}],
@@ -914,6 +946,43 @@ mod tests {
         assert_eq!(v["tool_choice"], "required");
         assert_eq!(v["reasoning"]["effort"], "high");
         assert_eq!(v["temperature"], 0.7);
+    }
+
+    #[test]
+    fn test_ir_req_to_responses_thinking_as_reasoning_item() {
+        // Thinking 必须落在独立 reasoning item 的 summary 中，且排在 message 之前
+        let req = IrRequest {
+            model: "gpt-4o".to_string(),
+            system: None,
+            messages: vec![IrMessage {
+                role: IrRole::Assistant,
+                content: vec![
+                    IrContentBlock::Thinking {
+                        thinking: "let me think".to_string(),
+                        signature: None,
+                    },
+                    IrContentBlock::Text {
+                        text: "answer".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            }],
+            tools: vec![],
+            tool_choice: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            thinking: None,
+            stream: false,
+        };
+        let v = ir_req_to_responses(&req);
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["summary"][0]["type"], "summary_text");
+        assert_eq!(input[0]["summary"][0]["text"], "let me think");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["content"][0]["type"], "input_text");
     }
 
     #[test]
@@ -1111,8 +1180,55 @@ mod tests {
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("event: response.output_item.added"));
         assert!(s.contains("\"type\":\"function_call\""));
-        assert!(s.contains("\"call_id\":\"call_1\""));
         assert!(s.contains("\"name\":\"search\""));
+        // item 级 id 与 call_id 都必须存在（call_id 由本层生成，不复用上游 id）
+        assert!(s.contains("\"id\":\"fc_"));
+        assert!(s.contains("\"call_id\":\"call_"));
+        assert!(!s.contains("\"call_id\":\"call_1\""));
+    }
+
+    #[test]
+    fn test_tool_call_roundtrip_has_id_and_call_id() {
+        // function_call item 的 id / call_id 在 added 与 done 中保持一致
+        let mut state = ResponsesRenderState::new();
+        state.response_id = "resp_1".to_string();
+        state.model = "gpt-4o".to_string();
+        let start = IrStreamEvent::ContentBlockStart {
+            index: 0,
+            block: IrContentBlockStart::ToolUse {
+                id: "toolu_1".to_string(),
+                name: "pwsh".to_string(),
+            },
+        };
+        let added = String::from_utf8_lossy(&state.render_event(&start).unwrap()).to_string();
+        let added_item: Value = serde_json::from_str(
+            added
+                .split("data: ")
+                .nth(1)
+                .unwrap()
+                .trim()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let item = &added_item["item"];
+        let item_id = item["id"].as_str().unwrap().to_string();
+        let call_id = item["call_id"].as_str().unwrap().to_string();
+        assert!(item_id.starts_with("fc_"));
+        assert!(call_id.starts_with("call_"));
+
+        state.render_event(&IrStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: IrContentDelta::InputJsonDelta("{\"command\":\"ls\"}".to_string()),
+        });
+        let done = String::from_utf8_lossy(
+            &state.render_event(&IrStreamEvent::ContentBlockStop { index: 0 }).unwrap(),
+        )
+        .to_string();
+        // done 中的 function_call item 携带同一个 id / call_id
+        assert!(done.contains(&format!("\"id\":\"{}\"", item_id)));
+        assert!(done.contains(&format!("\"call_id\":\"{}\"", call_id)));
     }
 
     #[test]
