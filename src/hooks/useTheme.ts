@@ -12,7 +12,7 @@ interface ThemeState {
 
 export const useThemeStore = create<ThemeState>((set) => ({
   theme: (localStorage.getItem('theme') as Theme) || 'system',
-  hue: parseInt(localStorage.getItem('theme-hue') || '200'),
+  hue: parseInt(localStorage.getItem('theme-hue') || '211'),
   setTheme: (theme) => {
     localStorage.setItem('theme', theme);
     applyTheme(theme);

@@ -260,6 +260,10 @@ export default {
   // ── 密钥列表 ──
   'keys.title': '密钥',
   'keys.create': '创建密钥',
+  'keys.address_anthropic': 'Anthropic 风格地址',
+  'keys.address_openai': 'OpenAI 风格地址',
+  'keys.address_local': '本地',
+  'keys.address_lan': '局域',
   'keys.search': '搜索密钥名称或掩码…',
   'keys.col_key': '密钥',
   'keys.col_models': '可用模型',
