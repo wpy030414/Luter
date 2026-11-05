@@ -8,7 +8,7 @@ use super::route::{PickedKey, ResolvedRoute};
 /// 插件委托候选的占位凭证：Router 不为插件管理密钥，恒发此占位值
 /// （messages kind → `x-api-key`，其余 → `Authorization: Bearer`）。
 /// 插件必须忽略它，以自身凭证（login 流程持有）访问上游。
-pub(super) const PLUGIN_KEY_PLACEHOLDER: &str = "xrl-router";
+pub(super) const PLUGIN_KEY_PLACEHOLDER: &str = "luter";
 
 /// Pick the next available key for a provider from the pool (round-robin,
 /// skips Red/Yellow). Returns PickedKey with plaintext key, id, name, masked.

@@ -50,9 +50,9 @@ export default {
   'settings.tab.data': 'Privacy',
 
   'settings.about.title': 'About',
-  'settings.about.desc': 'XRL Router is a multi-provider AI LLM API routing gateway with cross-provider model tier scheduling and protocol translation.',
+  'settings.about.desc': 'Luter is a multi-provider AI LLM API routing gateway with cross-provider model tier scheduling and protocol translation.',
   'settings.about.version': 'Version {version}',
-  'settings.about.github': 'github.com/wpy030414/xrl-router',
+  'settings.about.github': 'github.com/wpy030414/luter',
 
   'settings.language.title': 'Language',
   'settings.language.desc': 'Switch interface language',
@@ -182,7 +182,7 @@ export default {
   'providers.plugin_badge': 'Plugin',
   'providers.plugin_delegated': 'Delegated via plugin',
   'providers.plugin_autostart': 'Start with Router',
-  'providers.plugin_autostart_tip': 'When enabled, XRL Router launches this plugin gateway on startup',
+  'providers.plugin_autostart_tip': 'When enabled, Luter launches this plugin gateway on startup',
   'providers.plugin_autostart_failed': 'Failed to toggle companion start: {msg}',
   'providers.plugin_login': 'Sign in',
   'providers.plugin_login_launched': 'Login started — complete it in the browser page that just opened',
@@ -379,7 +379,7 @@ export default {
   // ── Install page ──
   'install.title': 'Client Deploy',
   'install.no_key_title': 'No key provided',
-  'install.no_key_desc': 'Create a key in the XRL Router key management page on the host, then open the "deploy link" from the popup.',
+  'install.no_key_desc': 'Create a key in the Luter key management page on the host, then open the "deploy link" from the popup.',
   'install.platform_label': 'Operating System',
   'install.platform_windows': 'Windows',
   'install.platform_macos': 'macOS',
@@ -392,6 +392,6 @@ export default {
   'install.models_loading': 'Fetching gateway models…',
   'install.models_fetch_error': 'Failed to fetch models: {msg}',
   'install.models_error_ignore': 'You can ignore this — the command will skip default models (Claude Code uses its own defaults; missing aliases may 404).',
-  'install.no_models': 'No models available on the gateway. Configure providers and models on the host XRL Router first.',
+  'install.no_models': 'No models available on the gateway. Configure providers and models on the host Luter first.',
   'install.command_title': 'Executable Command · {platform}',
 };

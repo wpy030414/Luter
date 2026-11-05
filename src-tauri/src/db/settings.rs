@@ -28,7 +28,7 @@ impl super::Database {
     /// Covers: providers, models, api_keys, service_keys, plugins, usage_log, settings, combos, combo_members.
     pub fn export_sql(&self) -> anyhow::Result<String> {
         let conn = self.conn.lock().unwrap();
-        let mut sql = String::from("-- XRL Router export\n");
+        let mut sql = String::from("-- Luter export\n");
         sql.push_str(&format!("-- Exported at: {}\n\n", chrono::Utc::now().to_rfc3339()));
         sql.push_str("BEGIN TRANSACTION;\n\n");
 

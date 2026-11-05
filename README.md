@@ -1,8 +1,8 @@
-# xrl-router
+# Luter
 
 > 多 Provider AI LLM API 路由网关 — Tauri 2 桌面应用
 
-xrl-router 是一个运行在本地的 LLM API 统一网关。客户端通过 Anthropic Messages、OpenAI Chat Completions 或 OpenAI Responses API 三种端点访问所有大模型 Provider，网关负责路由解析、密钥轮换和用量统计。
+Luter 是一个运行在本地的 LLM API 统一网关。客户端通过 Anthropic Messages、OpenAI Chat Completions 或 OpenAI Responses API 三种端点访问所有大模型 Provider，网关负责路由解析、密钥轮换和用量统计。
 
 ## 界面预览
 

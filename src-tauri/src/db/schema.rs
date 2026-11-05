@@ -179,7 +179,7 @@ UPDATE usage_log SET prompt_tokens = prompt_tokens + COALESCE(cache_creation_inp
 ALTER TABLE usage_log DROP COLUMN cache_creation_input_tokens;
 "#,
     // V11: Plugin system — tracks registered plugins and their associated providers.
-    // Each plugin (e.g., xrl-router-plugin-wukong) connects via WebSocket and acts as
+    // Each plugin (e.g., luter-plugin-wukong) connects via WebSocket and acts as
     // a "delegated provider": the plugin handles protocol translation + DEAP header injection,
     // while Router manages key rotation and request routing.
     r#"

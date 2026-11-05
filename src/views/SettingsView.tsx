@@ -171,7 +171,7 @@ export function SettingsView() {
       if (isTauri()) {
         const path = await tauriDialog.save({
           title: t('settings.data.export.title'),
-          defaultPath: `xrl-router-backup-${new Date().toISOString().split('T')[0]}.sql`,
+          defaultPath: `luter-backup-${new Date().toISOString().split('T')[0]}.sql`,
           filters: [{ name: 'SQL', extensions: ['sql'] }],
         });
         if (path) {
@@ -182,7 +182,7 @@ export function SettingsView() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `xrl-router-backup-${new Date().toISOString().split('T')[0]}.sql`;
+        a.download = `luter-backup-${new Date().toISOString().split('T')[0]}.sql`;
         a.click();
         URL.revokeObjectURL(url);
       }
@@ -249,7 +249,7 @@ export function SettingsView() {
 
   // MCP endpoint info — always local, use 127.0.0.1 to avoid Tauri's tauri.localhost hostname
   const mcpEndpoint = 'http://127.0.0.1:19068/mcp';
-  const mcpCmd = `claude mcp add --scope user --transport http xrl-router ${mcpEndpoint} --header "Authorization: Bearer <SERVICE_KEY>"`;
+  const mcpCmd = `claude mcp add --scope user --transport http luter ${mcpEndpoint} --header "Authorization: Bearer <SERVICE_KEY>"`;
   const [copied, setCopied] = useState<'endpoint' | 'cmd' | null>(null);
 
   const handleCopyMcp = async (text: string, which: 'endpoint' | 'cmd') => {
@@ -304,7 +304,7 @@ export function SettingsView() {
             )}
             <p className="text-sm text-muted-foreground">{t('settings.about.desc')}</p>
             <a
-              href="https://github.com/wpy030414/xrl-router"
+              href="https://github.com/wpy030414/luter"
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm text-primary hover:underline"

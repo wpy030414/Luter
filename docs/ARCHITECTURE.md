@@ -1,10 +1,10 @@
-# ARCHITECTURE — xrl-router
+# ARCHITECTURE — Luter
 
 > 架构地图：描述稳定的结构关系，让 Agent 理解系统边界。
 
 ## 1. 系统总览
 
-xrl-router 是一个 **Tauri 2 桌面应用**，内部跑着一个 Rust axum HTTP 服务（`0.0.0.0:19068`），前端 React 19 SPA 运行在 Tauri WebView 中。
+Luter 是一个 **Tauri 2 桌面应用**，内部跑着一个 Rust axum HTTP 服务（`0.0.0.0:19068`），前端 React 19 SPA 运行在 Tauri WebView 中。
 
 ```
 ┌─── Tauri 桌面应用 ───────────────────────────────────────────────────────┐
@@ -317,7 +317,7 @@ Windows 平台去除原生标题栏，自定义红绿灯风格窗口控制按钮
               (令牌桶限流 + 5h/7d token 配额)
                         │
                         ▼
-                    xrl-router
+                    Luter
                         │
             ┌───────────┼───────────────┐
             │    Provider API Key       │
@@ -361,7 +361,7 @@ Windows 平台去除原生标题栏，自定义红绿灯风格窗口控制按钮
 ## 8. 外部依赖关系
 
 ```
-xrl-router
+Luter
   ├── Tauri 2          桌面框架
   ├── tauri-plugin-autostart  开机自启
   ├── tauri-plugin-dialog     导出/导入文件对话框
@@ -399,7 +399,7 @@ xrl-router
 ## 9. 插件系统交互
 
 ```
-xrl-router-plugin-wukong (外部进程)
+luter-plugin-wukong (外部进程)
     │
     │  WebSocket /ws/plugin
     │◀═══════════════════════════▶  register + heartbeat + keys_update

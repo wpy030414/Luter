@@ -1,6 +1,6 @@
 {
-  "productName": "XRL Router",
-  "version": "26.10.24",
+  "productName": "Luter",
+  "version": "26.11.5",
   "identifier": "im.xrl.router",
   "build": {
     "beforeDevCommand": "pnpm exec vite",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "XRL Router",
+        "title": "Luter",
         "width": 1200,
         "height": 800,
         "center": true,

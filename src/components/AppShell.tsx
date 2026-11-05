@@ -131,7 +131,7 @@ export function AppShell() {
               Windows 使用更大拖拽区域（40px），方便窗口拖动 */}
           <SidebarHeader className={`shrink-0 items-start border-b border-sidebar-border px-3 pb-[1.2rem] ${HEADER_PT}`}>
             <span className="block truncate pl-[0.2rem] text-[1.2rem] leading-none font-semibold select-none group-data-[collapsible=icon]:invisible">
-              XRL Router
+              Luter
             </span>
           </SidebarHeader>
           <SidebarContent>

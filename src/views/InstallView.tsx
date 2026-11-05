@@ -106,7 +106,7 @@ function buildChatGPTBash(token: string, base: string, model: string): string {
     `model_provider = "xrl"`,
     ``,
     `[model_providers.xrl]`,
-    `name = "XRL Router"`,
+    `name = "Luter"`,
     `base_url = "${base}/v1"`,
   ].join('\n');
   return (
@@ -123,7 +123,7 @@ function buildChatGPTPS(token: string, base: string, model: string): string {
     `model_provider = 'xrl'`,
     ``,
     `[model_providers.xrl]`,
-    `name = 'XRL Router'`,
+    `name = 'Luter'`,
     `base_url = '${base}/v1'`,
   ].join('`n');
   return [

@@ -258,10 +258,10 @@ pub fn run() {
 
     // Load configuration (env vars only — actual paths resolved in setup())
     let config = Config::from_env();
-    info!("xrl-router starting...");
+    info!("luter starting...");
     info!("Server port: {}", config.port);
 
-    // 开机自启时系统以 `xrl-router --minimized` 拉起进程；setup 里据此隐藏窗口。
+    // 开机自启时系统以 `luter --minimized` 拉起进程；setup 里据此隐藏窗口。
     // 手动启动（无该参数）不受影响，正常弹出窗口。
     let silent_start = std::env::args().any(|a| a == ARG_MINIMIZED);
     if silent_start {
@@ -432,7 +432,7 @@ pub fn run() {
             let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
             let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().cloned().unwrap())
-                .tooltip("xrl-router")
+                .tooltip("luter")
                 .menu(&menu)
                 .on_tray_icon_event(|tray, event| {
                     // 左键单击唤起主窗口；右键保持默认菜单行为（系统弹出上下文菜单）。
