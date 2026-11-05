@@ -38,7 +38,7 @@ pub(crate) async fn health_check(State(state): State<Arc<AppState>>) -> impl Int
 
     Json(serde_json::json!({
         "status": "ok",
-        "service": "xrl-router",
+        "service": "Luter",
         "version": env!("CARGO_PKG_VERSION"),
         "timestamp": Utc::now().timestamp(),
         "database": db_status,

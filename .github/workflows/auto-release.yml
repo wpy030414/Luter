@@ -11,7 +11,7 @@ on:
 
 env:
   # Project display name — change this ONE value to reuse the workflow.
-  PROJECT_NAME: XRL Router
+  PROJECT_NAME: Luter
   # Safety net: force any remaining Node 20 actions (e.g. rust-cache,
   # rust-toolchain) onto the Node 24 runtime.  All actions/* are already
   # on Node-24-native major versions.

@@ -66,8 +66,8 @@ pub(super) struct XrlMcpTools;
 impl ServerHandler for XrlMcpTools {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("XRL Router", env!("CARGO_PKG_VERSION"))
-                .with_title("XRL Router Tools")
+            Implementation::new("Luter", env!("CARGO_PKG_VERSION"))
+                .with_title("Luter Tools")
                 .with_description("本地网页搜索与抓取工具（Bing 搜索 + 浏览器渲染抓取）"),
         )
     }

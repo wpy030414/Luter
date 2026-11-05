@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["status"], "ok");
-        assert_eq!(body["service"], "xrl-router");
+        assert_eq!(body["service"], "Luter");
         assert_eq!(body["database"], "ok");
 
         // /api/providers：CRUD handler 路径（loopback → admin_ip_guard 放行，空库返回空数组）

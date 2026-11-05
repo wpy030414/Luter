@@ -13,7 +13,7 @@ Router 可托管插件网关进程（伴生启动）。
 ```
 插件（TS + Hono 反向代理网关，独立进程）
     ↓ WebSocket（控制面：注册/心跳/配置）
-xrl-router
+Luter
     ↓ HTTP（数据面：标准协议请求 + 占位凭证）
 插件网关
     ↓ 插件自身凭证
@@ -50,15 +50,15 @@ xrl-router
 
 ### 占位凭证契约
 
-Router 对插件上游请求**不注入任何真实密钥**，恒发占位值 `xrl-router`：
+Router 对插件上游请求**不注入任何真实密钥**，恒发占位值 `luter`：
 
 | provider kind | 携带的头 |
 |---------------|---------|
-| `messages` | `x-api-key: xrl-router` + `anthropic-version: 2023-06-01` |
-| `chat_completions` / `responses` | `Authorization: Bearer xrl-router` |
+| `messages` | `x-api-key: luter` + `anthropic-version: 2023-06-01` |
+| `chat_completions` / `responses` | `Authorization: Bearer luter` |
 
 实现上这由代理层的虚拟密钥机制承载：插件候选在密钥轮换处恒返回合成
-`PickedKey { key_hash: "xrl-router", id: "plugin:{provider_id}" }`，内层重试恒为 1 次。
+`PickedKey { key_hash: "luter", id: "plugin:{provider_id}" }`，内层重试恒为 1 次。
 
 ### 可用性反馈契约
 
@@ -223,7 +223,7 @@ pub struct ProviderConfig {
 返回版本或 null；不可用时 UI 的「伴生启动」「登录」入口禁用并提示原因）。
 
 - **开关**：插件供应商卡片菜单「伴生启动」（`PATCH /api/plugins/:id` 更新 `autostart`）。
-- **拉起时机**：XRL Router 启动、网关 listener 就绪后，对 `autostart=1` 且 `work_dir` 非空的
+- **拉起时机**：Luter 启动、网关 listener 就绪后，对 `autostart=1` 且 `work_dir` 非空的
   插件逐个 `pnpm run serve`（日志落 `{data_dir}/logs/plugins/{plugin_id}.log`，覆盖式）。
 - **已启动不重复启动**：① 已在 Router 托管列表 → 跳过；② provider 的 base_url 做 1s TCP 探测，
   连通（用户手动启动/上次残留实例）→ 跳过；③ serve 脚本幂等契约兜底。
@@ -250,7 +250,7 @@ pub struct ProviderConfig {
 
 1. **独立进程**: 插件运行在独立进程，崩溃不影响 Router
 2. **心跳机制**: 每 30 秒发送心跳，90 秒无心跳标记离线
-3. **无密钥职责**: Router 不存储/轮换/注入插件密钥；占位凭证恒为 `xrl-router`
+3. **无密钥职责**: Router 不存储/轮换/注入插件密钥；占位凭证恒为 `luter`
 4. **严格拒绝**: register 带 `keys` 或 `keys_update` 消息 → 回错并断开
 5. **模型管理**: 插件注册时提供模型列表，Router 存储到 models 表
 6. **生命周期**: 注册 → 确认 → 服务 → 离线/删除
@@ -282,7 +282,7 @@ pub struct ProviderConfig {
 
 1. **单元测试**: `parse_register_msg`（keys 拒绝/空数组拒绝/workdir 解析）、workdir 持久化与
    autostart 不被重连重置、`pick_key_for` 插件分支
-2. **集成测试**: 插件注册 → 占位凭证转发（上游收到 `Bearer xrl-router`）→ usage_log 归属
+2. **集成测试**: 插件注册 → 占位凭证转发（上游收到 `Bearer luter`）→ usage_log 归属
 3. **故障测试**: 插件回 401/5xx 时错误透传与 provider 冷却
 
 ## 完成标准
@@ -291,7 +291,7 @@ pub struct ProviderConfig {
 - [x] 插件注册（创建 Provider + Models；无密钥）
 - [x] 心跳检测（30s 间隔，90s 超时）
 - [x] 严格拒绝 keys（register 字段存在 / keys_update 消息 → 回错断开）
-- [x] 虚拟占位密钥放行（`xrl-router`，单次尝试，无健康黏性）
+- [x] 虚拟占位密钥放行（`luter`，单次尝试，无健康黏性）
 - [x] 伴生启动（runtime 探测 / TCP 去重 / 退出回收）
 - [x] 离线标记（`status=offline`，`enabled=0`）
 - [x] 插件删除（回收托管进程 + 级联删除 Provider + Models）

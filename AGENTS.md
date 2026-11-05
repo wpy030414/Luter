@@ -1,10 +1,10 @@
 # AGENTS.md
 
-本文件为 AI Agent 在 xrl-router 项目上工作时必须遵守的边界与约束。
+本文件为 AI Agent 在 Luter 项目上工作时必须遵守的边界与约束。
 
 ## Overview
 
-xrl-router 是一个**单用户本地 LLM API 网关**，以 Tauri 2 桌面应用形式运行。
+Luter 是一个**单用户本地 LLM API 网关**，以 Tauri 2 桌面应用形式运行。
 
 - **后端**：Rust + axum HTTP 服务，单 listener 绑 `0.0.0.0:19068`
 - **前端**：React 19 SPA，跑在 Tauri WebView 里

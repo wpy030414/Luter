@@ -1,10 +1,10 @@
 [package]
-name = "xrl-router"
+name = "luter"
 version = "0.1.0"
 description = "Multi-Provider AI LLM API Routing Gateway"
 authors = ["xrl"]
 edition = "2021"
-default-run = "xrl-router"
+default-run = "luter"
 
 [lib]
 name = "xrl_router_lib"

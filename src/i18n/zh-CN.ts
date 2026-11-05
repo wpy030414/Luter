@@ -50,9 +50,9 @@ export default {
   'settings.tab.data': '隐私',
 
   'settings.about.title': '关于',
-  'settings.about.desc': 'XRL Router 是一个多 Provider AI LLM API 路由网关，支持跨 Provider 的模型层级调度和协议翻译。',
+  'settings.about.desc': 'Luter 是一个多 Provider AI LLM API 路由网关，支持跨 Provider 的模型层级调度和协议翻译。',
   'settings.about.version': '版本 {version}',
-  'settings.about.github': 'github.com/wpy030414/xrl-router',
+  'settings.about.github': 'github.com/wpy030414/luter',
 
   'settings.language.title': '语言',
   'settings.language.desc': '切换界面语言',
@@ -182,7 +182,7 @@ export default {
   'providers.plugin_badge': '插件',
   'providers.plugin_delegated': '由插件委托接入',
   'providers.plugin_autostart': '伴生启动',
-  'providers.plugin_autostart_tip': '开启后，XRL Router 启动时自动拉起该插件网关',
+  'providers.plugin_autostart_tip': '开启后，Luter 启动时自动拉起该插件网关',
   'providers.plugin_autostart_failed': '伴生启动设置失败：{msg}',
   'providers.plugin_login': '登录',
   'providers.plugin_login_launched': '登录已启动，请在弹出的浏览器页面中完成',
@@ -379,7 +379,7 @@ export default {
   // ── Install 页面 ──
   'install.title': '客户分发',
   'install.no_key_title': '未携带密钥',
-  'install.no_key_desc': '请从主机的 XRL Router 密钥管理页「创建密钥」，复制弹出的「分发链接」打开此页面。',
+  'install.no_key_desc': '请从主机的 Luter 密钥管理页「创建密钥」，复制弹出的「分发链接」打开此页面。',
   'install.platform_label': '操作系统',
   'install.platform_windows': 'Windows',
   'install.platform_macos': 'macOS',
@@ -392,6 +392,6 @@ export default {
   'install.models_loading': '正在拉取网关可用模型…',
   'install.models_fetch_error': '拉取模型失败：{msg}',
   'install.models_error_ignore': '可忽略，命令将不写默认模型（Claude Code 会用其默认模型名，若网关无对应别名将 404）。',
-  'install.no_models': '网关暂无可用模型。请先在主机 XRL Router 配置供应商与模型。',
+  'install.no_models': '网关暂无可用模型。请先在主机 Luter 配置供应商与模型。',
   'install.command_title': '可执行命令 · {platform}',
 };

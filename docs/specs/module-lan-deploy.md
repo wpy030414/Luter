@@ -13,7 +13,7 @@
 ## 架构：单 listener + 路径级 IP 限制 + SPA fallback
 
 ```
-┌──────────────────── xrl-router (axum) ────────────────────┐
+┌──────────────────── Luter (axum) ────────────────────┐
 │  单 listener  0.0.0.0:19068                                │
 │  公开路径（不限 IP）：                                       │
 │    /health  /ws  /ws/plugin  /api/ui-settings  /v1/*       │
@@ -112,7 +112,7 @@ model = "<别名>"
 model_provider = "xrl"
 
 [model_providers.xrl]
-name = "XRL Router"
+name = "Luter"
 base_url = "<页面 origin>/v1"
 ```
 

@@ -1,4 +1,4 @@
-# xrl-router — 产品需求文档
+# Luter — 产品需求文档
 
 > 版本: CalVer · 更新日期: 2026-08-25
 
@@ -27,7 +27,7 @@
 ### 2.3 核心使用场景
 
 **场景 A：首次配置**
-1. 打开 xrl-router 桌面应用
+1. 打开 Luter 桌面应用
 2. 在「供应商」页面添加 Provider（选类型、填 URL、填 Key）
 3. 创建 Service Key
 4. 在 Claude Code 配置 base URL 和 Service Key
@@ -39,7 +39,7 @@
 3. 后续请求透明继续
 
 **场景 C：插件自动发现**
-1. 启动 xrl-router-plugin-wukong
+1. 启动 luter-plugin-wukong
 2. 插件 WS 连接到 Router → 发送注册信息
 3. Router 弹出确认对话框
 4. 用户确认 → 委托供应商自动激活
