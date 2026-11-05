@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Plus, Search, Copy, Check, Trash2, Pencil, Shield, Gauge, Key as KeyIcon, Loader2, MoreVertical } from 'lucide-react';
+import { Plus, Copy, Check, Trash2, Pencil, Shield, Gauge, Key as KeyIcon, Loader2, MoreVertical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogContent,
@@ -117,7 +118,17 @@ export function KeysView() {
 
   const [keys, setKeys] = useState<ServiceKeyRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
+  // 接入地址：lanMode 切换 host（127.0.0.1 ↔ 本机 LAN IP），记忆在 localStorage
+  const [lanMode, setLanMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('luter.keys.lanMode') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [hostIp, setHostIp] = useState<string | null>(null);
+  const [hostPort, setHostPort] = useState(19068);
+  const [copiedAddr, setCopiedAddr] = useState<'anthropic' | 'openai' | null>(null);
 
   // 时间列显示模式：默认「最后调用」，单击表头循环切换
   type TimeMode = 'last_used' | 'updated' | 'created';
@@ -178,6 +189,25 @@ export function KeysView() {
     return () => window.clearInterval(timer);
   }, []);
 
+  // 地址行的 LAN IP / 端口
+  useEffect(() => {
+    installApi
+      .localIp()
+      .then((r) => {
+        if (r.ip) setHostIp(r.ip);
+        if (r.port) setHostPort(r.port);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('luter.keys.lanMode', lanMode ? '1' : '0');
+    } catch {
+      /* 隐私模式下不可写，忽略 */
+    }
+  }, [lanMode]);
+
   // 分发链接：创建成功后拉取本机 LAN IP（取不到则仅展示明文）
   useEffect(() => {
     if (createdKey && !localIp) {
@@ -189,15 +219,6 @@ export function KeysView() {
   }, [createdKey, localIp]);
 
   const deployLink = createdKey && localIp ? `http://${localIp}:${localPort}/install?key=${createdKey.key}` : '';
-
-  // Filtered keys
-  const filteredKeys = useMemo(() => {
-    if (!searchQuery.trim()) return keys;
-    const query = searchQuery.toLowerCase();
-    return keys.filter(
-      (k) => k.name.toLowerCase().includes(query) || k.key_masked.toLowerCase().includes(query)
-    );
-  }, [keys, searchQuery]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -371,6 +392,20 @@ export function KeysView() {
 
   const chip = 'inline-flex items-center px-2 py-1 rounded-md bg-background border text-xs font-mono';
 
+  // 接入地址：网关路由是 /v1/messages 与 /v1/chat/completions。
+  // Anthropic base 不带 /v1（SDK 自行拼 /v1/messages）；OpenAI base 约定带 /v1。
+  const addrHost = lanMode && hostIp ? hostIp : '127.0.0.1';
+  const addrOrigin = `http://${addrHost}:${hostPort}`;
+  const anthropicBase = addrOrigin;
+  const openaiBase = `${addrOrigin}/v1`;
+
+  const copyAddress = async (which: 'anthropic' | 'openai', text: string) => {
+    const ok = await copyToClipboard(text);
+    if (!ok) return;
+    setCopiedAddr(which);
+    setTimeout(() => setCopiedAddr((c) => (c === which ? null : c)), 2000);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -382,16 +417,40 @@ export function KeysView() {
         </Button>
       </div>
 
-      {/* Search */}
-      <div className="relative flex-1 min-w-[200px] max-w-md">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-        <Input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder={t('keys.search')}
-          className="w-full h-10 pl-10 pr-4 rounded-md border border-input bg-background text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
+      {/* Endpoint addresses：客户端接入 base URL，随「本地/局域」开关切换 host */}
+      <div className="flex items-end gap-3 flex-wrap">
+        <div className="flex-1 min-w-[220px]">
+          <Label className="text-xs text-muted-foreground">{t('keys.address_anthropic')}</Label>
+          <div className="flex gap-2 mt-1">
+            <Input type="text" readOnly value={anthropicBase} className="flex-1 font-mono" />
+            <Button
+              size="icon"
+              className="shrink-0"
+              onClick={() => copyAddress('anthropic', anthropicBase)}
+            >
+              {copiedAddr === 'anthropic' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            </Button>
+          </div>
+        </div>
+        <div className="flex-1 min-w-[220px]">
+          <Label className="text-xs text-muted-foreground">{t('keys.address_openai')}</Label>
+          <div className="flex gap-2 mt-1">
+            <Input type="text" readOnly value={openaiBase} className="flex-1 font-mono" />
+            <Button
+              size="icon"
+              className="shrink-0"
+              onClick={() => copyAddress('openai', openaiBase)}
+            >
+              {copiedAddr === 'openai' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            </Button>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 h-9">
+          <Label htmlFor="keys-lan-switch" className="text-xs">
+            {lanMode ? t('keys.address_lan') : t('keys.address_local')}
+          </Label>
+          <Switch id="keys-lan-switch" checked={lanMode} onCheckedChange={setLanMode} />
+        </div>
       </div>
 
       {/* Keys list */}
@@ -399,7 +458,7 @@ export function KeysView() {
         <div className="flex items-center justify-center py-16">
           <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
-      ) : filteredKeys.length === 0 ? (
+      ) : keys.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-16 text-center">
           <KeyIcon className="w-12 h-12 text-muted-foreground" />
           <p className="text-lg">{t('common.empty')}</p>
@@ -426,7 +485,7 @@ export function KeysView() {
               </tr>
             </thead>
             <tbody>
-              {filteredKeys.map((k) => {
+              {keys.map((k) => {
                 const lines = quotaLines(k, t);
                 return (
                   <tr key={k.id} className="border-b border-border last:border-b-0 hover:bg-muted/40">

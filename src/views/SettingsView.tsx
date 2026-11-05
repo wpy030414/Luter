@@ -442,7 +442,7 @@ export function SettingsView() {
                   value={mcpEndpoint}
                   className="flex-1 font-mono"
                 />
-                <Button size="sm" onClick={() => handleCopyMcp(mcpEndpoint, 'endpoint')}>
+                <Button size="icon" className="shrink-0" onClick={() => handleCopyMcp(mcpEndpoint, 'endpoint')}>
                   {copied === 'endpoint' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 </Button>
               </div>
@@ -455,7 +455,7 @@ export function SettingsView() {
                   value={mcpCmd}
                   className="flex-1 font-mono"
                 />
-                <Button size="sm" onClick={() => handleCopyMcp(mcpCmd, 'cmd')}>
+                <Button size="icon" className="shrink-0" onClick={() => handleCopyMcp(mcpCmd, 'cmd')}>
                   {copied === 'cmd' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 </Button>
               </div>

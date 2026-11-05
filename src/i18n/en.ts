@@ -260,6 +260,10 @@ export default {
   // ── Keys list ──
   'keys.title': 'Keys',
   'keys.create': 'Create Key',
+  'keys.address_anthropic': 'Anthropic-style Base URL',
+  'keys.address_openai': 'OpenAI-style Base URL',
+  'keys.address_local': 'Local',
+  'keys.address_lan': 'LAN',
   'keys.search': 'Search key name or mask…',
   'keys.col_key': 'Key',
   'keys.col_models': 'Available Models',

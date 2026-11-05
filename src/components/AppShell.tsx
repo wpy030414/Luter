@@ -147,7 +147,10 @@ export function AppShell() {
                       isActive={isActive}
                       tooltip={t(item.labelKey)}
                     >
-                      <NavLink to={item.path}>
+                      <NavLink
+                        to={item.path}
+                        className={isActive ? '!text-primary' : undefined}
+                      >
                         <Icon />
                         <span>{t(item.labelKey)}</span>
                       </NavLink>
