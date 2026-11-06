@@ -18,7 +18,7 @@
 //! - **显式截断**——输出头写明总长度与本次区间，尾部提示 `start_index` 续读，
 //!   不再让模型在「已截断」三个字之后失去后半篇。
 //!
-//! WebView 资产（见 docs/DECISIONS.md ADR-038 / ADR-056）：不探测外部浏览器、
+//! WebView 资产（见 docs/DECISIONS.md ADR-018）：不探测外部浏览器、
 //! 隐藏窗口 + Rust 单向 eval、远程页面拿不到 Tauri IPC。
 
 use std::collections::HashMap;

@@ -1,14 +1,12 @@
 # Spec: Claude FM 播放器（内置氛围电台）
 
-## 目标
-
-应用内置一个「永远在广播」的氛围电台（PRD F-43）：内置歌单循环播放，
+## 要构建什么
+应用内置一个「永远在广播」的氛围电台：内置歌单循环播放，
 后端直接解码输出到系统音频设备，前端只负责展示元信息与控制播放暂停；
 系统媒体控制（macOS Now Playing / Windows SMTC）同步播放态。
 桌面壁纸联动见 module-pixel-wallpaper。
 
-## 架构
-
+## 行为
 ```
 控制源                        Rust（lib.rs setup）                     播放线程 (std::thread)
 ┌─ FmView（前端） ─┐     souvlaki MediaControls                FmEngine::engine_loop
@@ -25,8 +23,6 @@
 - **前端是哑终端**：`useFm()` hook 订阅事件 + `fm_get_state` 拉快照，
   控制一律走 Tauri command → `FmEngine` mpsc。
 
-## Radio 模式语义（核心）
-
 - **暂停 = 静音，不是停时间轴**：`sink.set_volume(0.0)`，音频继续按实时速率消费，
   `sink.empty()` 照常触发切歌——与真正的收音机一致。
 - **静音与暂停正交**（`fm_set_muted`，默认有声）：静音 = **播放无声音乐**——
@@ -41,11 +37,20 @@
   后外层循环重新下载新曲。解除静音无需 re-anchor：静音期间时间轴一直在走，
   直接恢复音量即可。
 
-## 输入契约（Tauri command）
+像素艺术动画的唯一时钟源：仅播放（未暂停）时按真实流逝累计，暂停冻结
+（`tick_scene_t`，100ms 轮询推进）；静音不算暂停，动画照常播放。
+主窗口与壁纸窗口各自经 `fm_scene_t` 采样同一共享状态——两处画面严格同步。
+切曲下载/解码的静默间隙照走，与音频一致。
 
+- 曲目内置（`TRACKS`，含 `netease_id` + 时长），音源在线解析：
+  优先 `api.paugram.com` 解析接口取直链，失败回退网易云官方外链（302 → CDN）。
+- **双缓冲预加载**：当前曲播放时后台 `tauri::async_runtime::spawn` 下载下一曲
+  （`oneshot` 通道按索引绑定），切歌零等待；re-anchor 跳曲导致索引失配时丢弃重下。
+
+## 输入 / 输出
 | Command | 功能 |
 |---------|------|
-| `fm_toggle` / `fm_play` / `fm_pause` | 播放控制（前端 / 托盘 / 系统媒体键共用） |
+| `fm_toggle` | 播放/暂停切换（前端 / 托盘 / 系统媒体键共用同一 mpsc 控制通道） |
 | `fm_set_muted` | 静音开关（与暂停正交）：true = 播放无声音乐 |
 | `fm_get_state` | 状态快照：`{ready, playing, muted, artist, title, index, scene_t}` |
 | `fm_scene_t` | 像素场景动画时钟（秒），供渲染侧轮询采样 |
@@ -56,8 +61,6 @@
 转发进同一 mpsc；切歌/播放态变化经 `run_on_main_thread` dispatch 更新
 Now Playing 元数据与进度。
 
-## 输出契约（事件）
-
 | 事件 | 时机 | 载荷 |
 |------|------|------|
 | `fm-ready` | OutputStream 创建成功 | `()` |
@@ -67,22 +70,7 @@ Now Playing 元数据与进度。
 
 主窗口 `FmView` 与壁纸窗口 `WallpaperScene` 共用同一套事件接线。
 
-## 场景时钟（`scene_t`，引擎权威）
-
-像素艺术动画的唯一时钟源：仅播放（未暂停）时按真实流逝累计，暂停冻结
-（`tick_scene_t`，100ms 轮询推进）；静音不算暂停，动画照常播放。
-主窗口与壁纸窗口各自经 `fm_scene_t` 采样同一共享状态——两处画面严格同步。
-切曲下载/解码的静默间隙照走，与音频一致。
-
-## 音源获取
-
-- 曲目内置（`TRACKS`，含 `netease_id` + 时长），音源在线解析：
-  优先 `api.paugram.com` 解析接口取直链，失败回退网易云官方外链（302 → CDN）。
-- **双缓冲预加载**：当前曲播放时后台 `tauri::async_runtime::spawn` 下载下一曲
-  （`oneshot` 通道按索引绑定），切歌零等待；re-anchor 跳曲导致索引失配时丢弃重下。
-
-## 关键约束
-
+## 约束
 | 约束 | 原因 |
 |------|------|
 | rodio `OutputStream` 必须在播放线程内存活 | drop 即音频停止 |
@@ -92,8 +80,7 @@ Now Playing 元数据与进度。
 | 歌单变更须同步 `TOTAL_DURATION` 与累计偏移表 | 墙钟二分依赖它 |
 | 预热完成前托盘 FM 项隐藏 | 避免音源未就绪时误操作 |
 
-## 错误处理
-
+## 边界条件
 | 情况 | 行为 |
 |------|------|
 | 音源下载失败 | 记 warn，跳到下一首（电台不停播） |
@@ -101,19 +88,15 @@ Now Playing 元数据与进度。
 | OutputStream 创建失败 | 记 error，不 emit `fm-ready`（前端/托盘保持隐藏态） |
 | seek 失败 | 记 warn，从头播（不阻断） |
 
-## 实现位置
-
-- Rust：`src-tauri/src/api/handlers/fm.rs`（引擎）+ `lib.rs`（command / souvlaki / 托盘）
-- 前端：`src/views/FmView.tsx`、`src/hooks/useFm.ts`、
-  `src/components/PixelScene.tsx`（像素画布，`sampleT` 采样 `fm_scene_t`）
-
-## 测试要求
-
+## 验收标准
 - 暂停/恢复后墙钟对齐：静音超过一曲再恢复，应播「现在电台在播的那首」而非暂停处。
 - 托盘勾选、系统媒体键、前端按钮三入口状态一致。
 - 壁纸窗口与应用内像素画面同步（见 module-pixel-wallpaper）。
 
-## 完成标准
+## 完成定义
+- Rust：`src-tauri/src/api/handlers/fm.rs`（引擎）+ `lib.rs`（command / souvlaki / 托盘）
+- 前端：`src/views/FmView.tsx`、`src/hooks/useFm.ts`、
+  `src/components/PixelScene.tsx`（像素画布，`sampleT` 采样 `fm_scene_t`）
 
 - [x] 21 首内置歌单循环广播，墙钟种子定位
 - [x] 三控制入口（前端/托盘/媒体键）统一走 mpsc

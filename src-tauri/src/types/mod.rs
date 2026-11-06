@@ -101,7 +101,7 @@ pub struct Combo {
 }
 
 /// 本地模型（私有化）：GGUF 权重 + llama-server 引擎运行时元数据。
-/// 契约见 docs/specs/spec-local-models.md。
+/// 契约见 docs/specs/module-local-models.md。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalModel {
     pub id: String,

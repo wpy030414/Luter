@@ -96,7 +96,7 @@ fn attach(hwnd: HWND, host: HWND) -> bool {
 ///
 /// 为什么需要：
 /// - Win8+ `SetParent` 对 popup 风格窗口只做"重设父链"，窗口仍留在顶层
-///   Z 序（旧行为见 ADR-042 注记），视觉上盖住 `SHELLDLL_DefView`（桌面
+///   Z 序（见 ADR-003 的背景），视觉上盖住 `SHELLDLL_DefView`（桌面
 ///   图标层）；手动转 `WS_CHILD`（清 `WS_POPUP`）使其成为真正子窗、参与
 ///   宿主 Z 序；
 /// - `SetWindowPos(HWND_BOTTOM, SWP_NOMOVE|SWP_NOSIZE)` 沉底——幂等，

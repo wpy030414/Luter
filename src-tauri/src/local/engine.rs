@@ -1,7 +1,7 @@
 //! 引擎生命周期：llama.cpp 预编译二进制下载/解压 + llama-server 子进程。
 //!
 //! GGUF 格式使用 llama-server（`ggml-org/llama.cpp` releases，tag 见 `backend::LOCAL_LLAMA_TAG`）。
-//! 契约见 docs/specs/spec-local-models.md。
+//! 契约见 docs/specs/module-local-models.md。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;

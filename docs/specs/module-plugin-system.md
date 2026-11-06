@@ -1,15 +1,13 @@
 # Spec: 插件系统
 
-## 目标
-
+## 要构建什么
 允许外部服务通过 WebSocket 注册为"委托供应商"（反向代理网关），处理非标 API 协议和业务头注入。
 
 **V24 契约要点**：Router **不再为插件管理密钥**——凭证由插件方自持（login 流程获取）；
 每个插件实现必须是一个 **TypeScript + Hono 网关**，通过 package.json 脚本暴露 `login` / `serve` 生命周期；
 Router 可托管插件网关进程（伴生启动）。
 
-## 架构
-
+## 行为
 ```
 插件（TS + Hono 反向代理网关，独立进程）
     ↓ WebSocket（控制面：注册/心跳/配置）
@@ -30,8 +28,6 @@ Luter
 | 健康监控 | ✅（心跳 + provider 冷却） | — |
 | 用量统计 | ✅ | — |
 | 进程托管（伴生启动） | ✅（可选） | — |
-
-## 反向代理实现契约（V24）
 
 每个插件实现（反向代理）必须满足：
 
@@ -73,8 +69,6 @@ Router 对插件上游请求**不注入任何真实密钥**，恒发占位值 `l
 
 **注意**：占位密钥不在密钥池中，`update_key_health` 对其天然 no-op——插件会话恢复后
 无需任何恢复通道，下一个请求即恢复服务。
-
-## WebSocket 协议
 
 端点：`/ws/plugin`（公开路径，不限 IP）。
 
@@ -148,8 +142,32 @@ Router 不再为插件管理密钥（V24 迁移同时清理历史同步进来的
 {"type": "deleted", "reason": "plugin_ignored"}
 ```
 
-## 输入契约
+前置条件：系统内 `node` 与 `pnpm` 可用（Router 启动时探测并缓存，`GET /api/plugins/runtime`
+返回版本或 null；不可用时 UI 的「伴生启动」「登录」入口禁用并提示原因）。
 
+- **开关**：插件供应商卡片菜单「伴生启动」（`PATCH /api/plugins/:id` 更新 `autostart`）。
+- **拉起时机**：Luter 启动、网关 listener 就绪后，对 `autostart=1` 且 `work_dir` 非空的
+  插件逐个 `pnpm run serve`（日志落 `{data_dir}/logs/plugins/{plugin_id}.log`，覆盖式）。
+- **已启动不重复启动**：① 已在 Router 托管列表 → 跳过；② provider 的 base_url 做 1s TCP 探测，
+  连通（用户手动启动/上次残留实例）→ 跳过；③ serve 脚本幂等契约兜底。
+- **登录**：卡片菜单「登录」（`POST /api/plugins/:id/login`）在 work_dir 运行 `pnpm run login`
+  （短命一次性进程，日志 `{plugin_id}-login.log`），脚本自行弹系统浏览器。
+- **退出清理**：应用退出（RunEvent::Exit）时回收**Router 自己 spawn** 的 serve 进程——
+  Windows `taskkill /T /F`（杀祖孙进程树 pnpm.cmd → cmd → node），unix `kill -9 -- -pgid`
+  （spawn 时设独立进程组）。用户手动启动的网关不受影响。
+- **不做崩溃重启 watcher**：托管进程意外退出后由心跳超时自然标记离线。
+
+| 路由 | 说明 |
+|------|------|
+| `GET /api/plugins` | 列表（含 work_dir / autostart / connected） |
+| `GET /api/plugins/runtime` | node/pnpm 版本或 null（托管可用性） |
+| `GET /api/plugins/:id` | 详情（provider + models + work_dir + autostart） |
+| `PATCH /api/plugins/:id` | 更新 `{autostart?, work_dir?}`（work_dir 校验目录存在） |
+| `POST /api/plugins/:id/confirm` | 确认激活 |
+| `POST /api/plugins/:id/login` | 运行 `pnpm run login`（202；work_dir 缺失/runtime 缺失 → 400） |
+| `DELETE /api/plugins/:id` | 删除（先回收托管进程，级联 Provider + Models） |
+
+## 输入 / 输出
 ### 插件注册
 
 ```rust
@@ -189,8 +207,6 @@ pub fn check_heartbeats(state: &AppState) {
 }
 ```
 
-## 输出契约
-
 ### 插件状态
 
 插件状态使用纯字符串（非枚举），取值为：
@@ -217,37 +233,7 @@ pub struct ProviderConfig {
 | `work_dir TEXT` | 插件上报的项目根目录（伴生启动 cwd） |
 | `autostart INTEGER NOT NULL DEFAULT 0` | 伴生启动开关 |
 
-## 伴生启动（进程托管）
-
-前置条件：系统内 `node` 与 `pnpm` 可用（Router 启动时探测并缓存，`GET /api/plugins/runtime`
-返回版本或 null；不可用时 UI 的「伴生启动」「登录」入口禁用并提示原因）。
-
-- **开关**：插件供应商卡片菜单「伴生启动」（`PATCH /api/plugins/:id` 更新 `autostart`）。
-- **拉起时机**：Luter 启动、网关 listener 就绪后，对 `autostart=1` 且 `work_dir` 非空的
-  插件逐个 `pnpm run serve`（日志落 `{data_dir}/logs/plugins/{plugin_id}.log`，覆盖式）。
-- **已启动不重复启动**：① 已在 Router 托管列表 → 跳过；② provider 的 base_url 做 1s TCP 探测，
-  连通（用户手动启动/上次残留实例）→ 跳过；③ serve 脚本幂等契约兜底。
-- **登录**：卡片菜单「登录」（`POST /api/plugins/:id/login`）在 work_dir 运行 `pnpm run login`
-  （短命一次性进程，日志 `{plugin_id}-login.log`），脚本自行弹系统浏览器。
-- **退出清理**：应用退出（RunEvent::Exit）时回收**Router 自己 spawn** 的 serve 进程——
-  Windows `taskkill /T /F`（杀祖孙进程树 pnpm.cmd → cmd → node），unix `kill -9 -- -pgid`
-  （spawn 时设独立进程组）。用户手动启动的网关不受影响。
-- **不做崩溃重启 watcher**：托管进程意外退出后由心跳超时自然标记离线。
-
-## 管理 API
-
-| 路由 | 说明 |
-|------|------|
-| `GET /api/plugins` | 列表（含 work_dir / autostart / connected） |
-| `GET /api/plugins/runtime` | node/pnpm 版本或 null（托管可用性） |
-| `GET /api/plugins/:id` | 详情（provider + models + work_dir + autostart） |
-| `PATCH /api/plugins/:id` | 更新 `{autostart?, work_dir?}`（work_dir 校验目录存在） |
-| `POST /api/plugins/:id/confirm` | 确认激活 |
-| `POST /api/plugins/:id/login` | 运行 `pnpm run login`（202；work_dir 缺失/runtime 缺失 → 400） |
-| `DELETE /api/plugins/:id` | 删除（先回收托管进程，级联 Provider + Models） |
-
-## 关键约束
-
+## 约束
 1. **独立进程**: 插件运行在独立进程，崩溃不影响 Router
 2. **心跳机制**: 每 30 秒发送心跳，90 秒无心跳标记离线
 3. **无密钥职责**: Router 不存储/轮换/注入插件密钥；占位凭证恒为 `luter`
@@ -256,8 +242,7 @@ pub struct ProviderConfig {
 6. **生命周期**: 注册 → 确认 → 服务 → 离线/删除
 7. **autostart 不可被注册重置**: `save_plugin` 的 UPSERT 不含 autostart 列
 
-## 错误处理
-
+## 边界条件
 | 场景 | 行为 |
 |------|------|
 | WebSocket 连接断开 | 插件自动重连，Router 标记离线 |
@@ -268,8 +253,13 @@ pub struct ProviderConfig {
 | node/pnpm 不可用 | 伴生启动整体跳过（warn 日志），UI 入口禁用 |
 | work_dir 不存在 | spawn 失败记日志；PATCH 时 400 拒绝 |
 
-## 实现位置
+## 验收标准
+1. **单元测试**: `parse_register_msg`（keys 拒绝/空数组拒绝/workdir 解析）、workdir 持久化与
+   autostart 不被重连重置、`pick_key_for` 插件分支
+2. **集成测试**: 插件注册 → 占位凭证转发（上游收到 `Bearer luter`）→ usage_log 归属
+3. **故障测试**: 插件回 401/5xx 时错误透传与 provider 冷却
 
+## 完成定义
 - `src-tauri/src/plugin/mod.rs` - 插件管理器（DB helpers、autostart/workdir 写入）
 - `src-tauri/src/plugin/registry.rs` - 注册逻辑
 - `src-tauri/src/plugin/health.rs` - 心跳检测
@@ -277,15 +267,6 @@ pub struct ProviderConfig {
 - `src-tauri/src/plugin/types.rs` - 类型定义
 - `src-tauri/src/api/handlers/plugin.rs` - WebSocket 处理 + 管理 API
 - `src-tauri/src/api/proxy/key_rotation.rs` - 虚拟占位密钥（`pick_key_for` 插件分支）
-
-## 测试要求
-
-1. **单元测试**: `parse_register_msg`（keys 拒绝/空数组拒绝/workdir 解析）、workdir 持久化与
-   autostart 不被重连重置、`pick_key_for` 插件分支
-2. **集成测试**: 插件注册 → 占位凭证转发（上游收到 `Bearer luter`）→ usage_log 归属
-3. **故障测试**: 插件回 401/5xx 时错误透传与 provider 冷却
-
-## 完成标准
 
 - [x] WebSocket 连接管理
 - [x] 插件注册（创建 Provider + Models；无密钥）

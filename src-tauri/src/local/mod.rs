@@ -1,6 +1,6 @@
 //! 本地模型管理（私有化）：导入 GGUF 权重 → 引擎启动 → provider 注册 → 生命周期。
 //!
-//! 契约见 docs/specs/spec-local-models.md。要点：
+//! 契约见 docs/specs/module-local-models.md。要点：
 //! - 事件经 `AppState.key_stats_tx` 广播：`local_status`。
 //! - 对外暴露：每台本地模型注册一个 Chat Completions provider（id = `local-{model_id}`）
 //!   + 一条模型（display_name = 用户命名）+ 一条随机密钥（AES 加密入库、同步进 KeyPool）。

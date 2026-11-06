@@ -1,12 +1,12 @@
 # Spec: FM 像素艺术桌面壁纸（Pixel Wallpaper）
 
-## 目标
-
+## 要构建什么
 右击 FM 像素艺术画面勾选「设置为桌面背景」后，桌面壁纸被劫持为与应用程序内
 像素艺术**严格同步**的动画（不显示播放/暂停按钮与歌曲信息）；取消勾选即刻
 恢复原壁纸；勾选态持久化，应用重启（含 `--minimized` 静默启动）自动重建。
 
-## 架构
+## 行为
+> 平台方案演进：ADR-001（macOS WebView）→ Rust GDI 直绘（Windows，**已废弃**）→ ADR-002（Windows 透明 WebView + WorkerW 挂载，现行）。
 
 ```
 ┌─ 主窗口 "main"(FmView) ──┐   ┌─ 壁纸引擎（双平台透明 WebView）──────────┐
@@ -33,10 +33,10 @@
   WebView2 内容经 DWM 视觉合成上屏，是桌面 WorkerW 层唯一可靠渲染路径），
   自实现 WorkerW 挂载（配方同社区插件 `tauri-plugin-desktop-underlay`）：
   `SetParent` 进壁纸 WorkerW + 转 `WS_CHILD` 并 `SetWindowPos(HWND_BOTTOM)`
-  锚定宿主子窗 Z 序最底（防盖桌面图标，ADR-049）；WebView2 显式
-  `--disable-features=CalculateNativeWinOcclusion`
-  （避免遮挡检测暂停合成）+ 独立 user data directory（避免与主窗口环境
-  参数冲突 0x8007139F）；点击穿透 `WS_EX_TRANSPARENT`（顶层 + 递归子窗
+  锚定宿主子窗 Z 序最底（防盖桌面图标，ADR-003）；WebView2 参数
+  `--disable-features=CalculateNativeWinOcclusion`（避免遮挡检测暂停合成）由
+  `lib.rs::run()` 经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 与主窗口共用同一 user data folder
+  （不同参数会冲突 0x8007139F，故不建独立 folder）；点击穿透 `WS_EX_TRANSPARENT`（顶层 + 递归子窗
   1s 补轮，**禁用 WS_EX_LAYERED**——分层窗口不设属性不显示内容）。
   画面仍由前端同一份 `pixelart.ts` 渲染（`WallpaperScene` 黑底全屏）。
 - **时钟**：`scene_t` 仅播放（未静音）时按真实流逝累计、暂停冻结；主窗口与
@@ -48,8 +48,7 @@
   kCGDesktopIconWindowLevel)` + `orderFront:`（禁止 tao show 抢焦点）
   + `setIgnoresMouseEvents` 穿透。
 
-## 输入契约
-
+## 输入 / 输出
 ### Tauri command（前端 → Rust）
 
 ```rust
@@ -68,17 +67,16 @@ INSERT INTO settings (key, value) VALUES ('wallpaper_enabled', 'true'|'false')
 ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 ```
 
-## 关键约束
-
+## 约束
 1. **平台**：仅 Windows / macOS（`wallpaper_supported` 为 false 时前端隐藏
    菜单项）；v1 仅主显示器。
 2. **Windows 壁纸窗**：透明 `WebviewWindow`（`transparent(true)`，DWM 视觉合成上屏），
    自实现挂载 `SetParent` 进壁纸 WorkerW（配方同 `tauri-plugin-desktop-underlay`）
    + 转 `WS_CHILD` 并 `SetWindowPos(HWND_BOTTOM)` 锚定宿主最底层（桌面图标层
-   之下，防盖图标；show 后 1.5s 复查幂等重锚，ADR-049）；WebView2 显式
-   `--disable-features=CalculateNativeWinOcclusion`
-   （避免遮挡检测暂停合成）+ 独立 user data directory（避免与主窗口环境
-   参数冲突 0x8007139F）；点击穿透 `WS_EX_TRANSPARENT`（顶层 + 递归子窗
+   之下，防盖图标；show 后 1.5s 复查幂等重锚，ADR-003）；WebView2 参数
+  `--disable-features=CalculateNativeWinOcclusion`（避免遮挡检测暂停合成）由
+  `lib.rs::run()` 经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 与主窗口共用同一 user data folder
+  （不同参数会冲突 0x8007139F，故不建独立 folder）；点击穿透 `WS_EX_TRANSPARENT`（顶层 + 递归子窗
    1s 补轮，**禁用 WS_EX_LAYERED**——分层窗口不设属性不显示内容）。
    画面仍由前端同一份 `pixelart.ts` 渲染（`WallpaperScene` 黑底全屏）。
 3. **macOS 壁纸窗**：WebviewWindow 无装饰、`focused(false)`、`skip_taskbar`、
@@ -93,8 +91,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 7. **渲染一致性**：壁纸与主窗口渲染同一份 `pixelart.ts`（同 seed/playing/t
    参数），时钟同源（`fm_scene_t`）——任何渲染改动两侧同步可见。
 
-## 错误处理
-
+## 边界条件
 | 场景 | 行为 |
 |------|------|
 | 非支持平台（Linux）| `wallpaper_set` 返回 Err；`supported=false` → 前端不渲染菜单项 |
@@ -103,29 +100,9 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 | DB 持久化失败 | 仅 warn 日志，不阻断（窗口已生效，重启后可能需重新勾选） |
 | Explorer 重启 | Win：IsWindow 检测 → 1s 自愈重建；mac：Destroyed → 1s 重建 |
 | 时钟采样失败（macOS 前端）| `PixelScene` 回退本地 dt 累加，不中断渲染 |
-| WebView2 初始化竞态（macOS 恢复）| 恢复延迟 2s + 重试 3 次（主窗口 webview 就绪后） |
+| 应用重启恢复竞态 | 恢复延迟 2s + 重试（等主窗口 WebView2 就绪，避免 0x8007139F） |
 
-## 实现位置
-
-- `src-tauri/src/wallpaper/mod.rs` — WallpaperState + 建窗/挂载/自愈重建
-  （Windows 挂载经 `win.rs`，macOS 经 `macos.rs`）
-- `src-tauri/src/wallpaper/win.rs` — Windows 透明 WebView + 自实现 WorkerW
-  挂载（SetParent + Z 序锚定 `WS_CHILD`/`HWND_BOTTOM`，ADR-049）
-- `src-tauri/src/wallpaper/macos.rs` — macOS kCGDesktopIconWindowLevel
-- `src-tauri/src/api/handlers/fm.rs` — `scene_t` 引擎权威时钟 + `state_arc()`
-- `src-tauri/src/lib.rs` — `wallpaper_set` / `wallpaper_get_state` / `fm_scene_t`
-  command + setup 状态管理与惰性恢复
-- `src/main.tsx` — `__WALLPAPER_MODE__` 入口分支（macOS 壁纸窗口用）
-- `src/components/WallpaperScene.tsx` — 壁纸窗口渲染入口（macOS；无按钮/歌曲信息）
-- `src/hooks/useFm.ts` — FM 事件接线（主窗口/壁纸窗口共用）
-- `src/components/PixelScene.tsx` — `sampleT` 引擎时钟采样
-- `src/views/FmView.tsx` — 右键 ContextMenu（设置为桌面背景）
-- `src/components/ui/context-menu.tsx` — Radix 右键菜单组件
-- `src-tauri/capabilities/default.json` — windows 数组含 `"wallpaper"`（macOS）
-- `src-tauri/Cargo.toml` — target 依赖（windows 0.61 Gdi/LibraryLoader / objc2 0.6）
-
-## 测试要求
-
+## 验收标准
 1. **编译**：`cargo check`（Windows 本机；macOS cfg 由 CI macos-14 job 兜底）；
    `pnpm exec tsc --noEmit`。
 2. **手工冒烟（Windows 11）**：
@@ -140,7 +117,23 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
    不抢键盘焦点、随 Space/全屏跟随、退出恢复。
 4. **多语言**：zh-CN/en 菜单文案切换跟随。
 
-## 完成标准
+## 完成定义
+- `src-tauri/src/wallpaper/mod.rs` — WallpaperState + 建窗/挂载/自愈重建
+  （Windows 挂载经 `win.rs`，macOS 经 `macos.rs`）
+- `src-tauri/src/wallpaper/win.rs` — Windows 透明 WebView + 自实现 WorkerW
+  挂载（SetParent + Z 序锚定 `WS_CHILD`/`HWND_BOTTOM`，ADR-003）
+- `src-tauri/src/wallpaper/macos.rs` — macOS kCGDesktopIconWindowLevel
+- `src-tauri/src/api/handlers/fm.rs` — `scene_t` 引擎权威时钟 + `state_arc()`
+- `src-tauri/src/lib.rs` — `wallpaper_set` / `wallpaper_get_state` / `fm_scene_t`
+  command + setup 状态管理与惰性恢复
+- `src/main.tsx` — `__WALLPAPER_MODE__` 入口分支（macOS 壁纸窗口用）
+- `src/components/WallpaperScene.tsx` — 壁纸窗口渲染入口（macOS；无按钮/歌曲信息）
+- `src/hooks/useFm.ts` — FM 事件接线（主窗口/壁纸窗口共用）
+- `src/components/PixelScene.tsx` — `sampleT` 引擎时钟采样
+- `src/views/FmView.tsx` — 右键 ContextMenu（设置为桌面背景）
+- `src/components/ui/context-menu.tsx` — Radix 右键菜单组件
+- `src-tauri/capabilities/default.json` — windows 数组含 `"wallpaper"`（macOS）
+- `src-tauri/Cargo.toml` — target 依赖（windows 0.61 Gdi/LibraryLoader / objc2 0.6）
 
 - [x] 右键菜单「设置为桌面背景/取消桌面背景」（i18n 双包）
 - [x] 桌面壁纸动画与主窗口严格同步（同 seed/playing/时钟）
@@ -149,6 +142,6 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 - [x] 取消勾选 / 应用退出 → 原壁纸恢复
 - [x] 重启（含 --minimized）自动恢复勾选态
 - [x] Explorer 重启自动重建（Destroyed → 1s 延迟）
-- [ ] Windows 真机验证 Z 序锚定：图标可见可点（ADR-049 修复）
+- [ ] Windows 真机验证 Z 序锚定：图标可见可点（ADR-003 修复）
 - [x] `cargo check` + `tsc --noEmit` 通过
 - [ ] macOS 真机验证（CI 编译兜底；运行时验证待真机）
