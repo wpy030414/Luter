@@ -35,6 +35,8 @@ mod wallpaper;
 mod system;
 // 冷启动原生环形进度条（tiny-skia 渲染，平台原生窗口——比 WebView 先出现）
 mod splash;
+// 品牌图形：菜单栏模板图标与 macOS 图标素材（见 src/bin/icon.rs）
+pub mod brand;
 
 // SDK 合规验证（fixtures 导出 + Python 官方 SDK 校验脚本）。
 // 本目录仅 test 构建；正式构建不编译任何测试代码。
@@ -430,9 +432,15 @@ pub fn run() {
                 fm_item: None,
             }));
             let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
-            let _tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
-                .icon(app.default_window_icon().cloned().unwrap())
-                .tooltip("luter")
+            // 菜单栏图标：纯色剪影 + 模板标记，颜色交给系统（浅色菜单栏自动画黑、
+            // 深色画白）。不能用 default_window_icon——那是彩色应用图标，
+            // 在菜单栏里既看不清也不随主题变色。见 brand::tray。
+            let tray_builder = tauri::tray::TrayIconBuilder::with_id("main-tray")
+                .icon(brand::tray::tray_image())
+                .tooltip("luter");
+            #[cfg(target_os = "macos")]
+            let tray_builder = tray_builder.icon_as_template(true);
+            let _tray = tray_builder
                 .menu(&menu)
                 .on_tray_icon_event(|tray, event| {
                     // 左键单击唤起主窗口；右键保持默认菜单行为（系统弹出上下文菜单）。
