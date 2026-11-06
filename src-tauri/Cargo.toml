@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 # Tauri（透明窗口：Windows 走 WebviewWindowBuilder::transparent；macOS WKWebView 默认透明，
 # 该 API 在 macOS 上未暴露，须 cfg 隔离——见 src/wallpaper/mod.rs create_window）
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
+tauri-plugin-shell = "2.6.0"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -61,10 +61,10 @@ dashmap = "6"
 tokio-stream = { version = "0.1", features = ["sync"] }
 scraper = "0.20"
 url = "2"
-tauri-plugin-autostart = "2.5.1"
-tauri-plugin-dialog = "2.7.2"
-tauri-plugin-fs = "2.5.1"
-tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2.7.0"
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-fs = "2.7.1"
+tauri-plugin-notification = "2.8.0"
 
 # Audio playback
 rodio = "0.20"
