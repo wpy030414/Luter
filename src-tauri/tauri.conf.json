@@ -3,9 +3,9 @@
   "version": "26.11.5",
   "identifier": "im.xrl.router",
   "build": {
-    "beforeDevCommand": "pnpm exec vite",
+    "beforeDevCommand": "pnpm exec vp dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm exec vite build",
+    "beforeBuildCommand": "pnpm exec vp build",
     "frontendDist": "../dist"
   },
   "app": {
