@@ -1,87 +1,70 @@
 # Spec: 本地模型管理（Local Models）
 
-## 目标
+## 要构建什么
+把开源 GGUF 模型变成「零配置私有 Provider」：用户导入本地 GGUF 文件 → 启动 `llama-server` → 以普通 Provider/Model/Key 身份注册进网关（`http://127.0.0.1:<port>`），与云端 Provider 一样参与路由、组合、密钥与统计体系。
 
-把开源 GGUF 模型变成「零配置私有 Provider」：用户自行下载 GGUF 文件后通过文件选择器导入
-→ 自动启动 `llama-server` → 以普通 Provider/Model 身份注册进网关（`http://127.0.0.1:<port>/v1`），
-与云端 Provider 一样参与路由、组合、密钥与统计体系。对应 PRD §10「本地模型规格」。
-
-## 架构
-
+## 行为
 ```
-前端                                  Rust
-LocalModelsView.tsx ─┐                local/mod.rs     LocalManager（注册表 + 生命周期）
-                     ├─ REST /api/local/* ├─ engine.rs   llama-server 二进制管理 + 健康检查
-                     │                    └─ backend.rs  GPU 后端检测（Metal/CUDA/Vulkan/ROCm/CPU）
-                     ▼
-        注册后作为普通 Provider 进入网关（base_url = 本机端口）
+LocalModelsView.tsx ── REST /api/local/* ──▶ local/mod.rs   LocalManager（注册表 + 生命周期）
+                                             ├─ engine.rs   llama-server 二进制下载/解压 + 健康检查 + 端口
+                                             └─ backend.rs  GPU 后端检测（Metal/CUDA/Vulkan/ROCm/CPU）
 ```
 
-- **引擎**：外部二进制 `llama-server`（llama.cpp 发行版），首次使用时下载/缓存到应用数据目录；
-  每个模型一个进程，绑定 `127.0.0.1` 上的独立端口。
-- **注册为 Provider**：本地模型启动后在 DB 中维护 `local_models` 记录，并映射出
-  Provider/Model 语义（见 PRD §10.3）；网关侧对它的转发与云端 Provider 无差别。
-- **状态**：`LocalManager` 持有引擎进程句柄，纯内存（与密钥池同一哲学）。
+- **引擎**：外部二进制 `llama-server`（`ggml-org/llama.cpp` releases，tag 见 `backend::LOCAL_LLAMA_TAG`），首次启动时按后端下载并解压到数据目录 `engines/`；每个模型一个进程。
+- **启动参数**（`engine::spawn_llama_server`，固定传入）：`--model <gguf> --host 127.0.0.1 --port <port> --ctx-size --n-gpu-layers --reasoning on|off --api-key <随机> --parallel 1`；stdout/stderr 落 `engines/engine-{id}.log`。
+- **端口**：`engine::free_port()` 绑定 `127.0.0.1:0` 由系统分配，启动时一次确定；stop 后释放。
+- **注册语义**（`register_provider`）：
+  - Provider：id `local-{lm-id}`，kind `chat_completions`，`base_url=http://127.0.0.1:<port>`，`api_path=/v1/chat/completions`，`sort_order` 取当前最大值之后
+  - Model：id `local-m-{lm-id}`，`display_name = model_id`（用户命名），`tier="local"`，`context_window = ctx_size`，`capabilities=["text","tools"]`
+  - Key：id `local-k-{lm-id}`，随机 32 位 hex，AES-256-GCM 入库并立即装载进 KeyPool（引擎的 `--api-key` 即此值）
+- **状态**：`LocalManager` 持引擎句柄（`running: Mutex<HashMap<id, RunningEngine>>`），纯内存；状态经 `local_status` 事件广播，DB `local_models.status` 同步为 `downloaded|running|error`。
 
-## 输入契约（管理 API — `api/handlers/local.rs`，仅本机回环）
+- **导入**：`POST` 携带 `local_path` → 校验存在且扩展名为 `.gguf`（格式必须 `gguf`）→ 名称冲突检查（`alias_taken` 同时查 models 与 combos）→ 生成 `lm-{uuid}` → 拷贝到 `models/{id}/model.gguf` → 记录 `file_size` → `status=downloaded`；拷贝或元数据失败即删除目标文件并报错，不产生半成品记录。`ctx_size` 下限 1024、`n_gpu_layers` 下限 0，`thinking` 新建时为 1。
+- **后端解析**：`backend=auto` 时取检测列表中首个可用且非 CPU 的后端，否则 CPU；启动序列为「首选 + CPU 兜底」，逐个尝试，全部失败才报错（错误汇总各后端原因 + 日志路径）。`GET /api/local/backends` 返回候选及可用理由，进程内缓存（`OnceLock`）。
+- **健康检查**：`wait_healthy` 轮询引擎 `GET /v1/models`（Bearer），超时 **120s**（`START_TIMEOUT`）。
+- **崩溃重启**：watcher 每 500ms `try_wait`；进程退出 → 状态置 `error` 并广播 → 按 **5s / 15s / 45s** 退避重启，**最多 3 次**；期间被 stop 移除则放弃；3 次全败放弃（记 error 日志）。
+- **停止**：从 running 表移除 → unix `kill -9 <pid>` / Windows `taskkill /F /PID` → 等 child 回收 → provider `enabled=false`（DB + 内存）→ 从 KeyPool 移除该 provider → 状态回 `downloaded`、`port=NULL`。
+- **自启动**：`auto_start_all()` 在应用启动时（含 `--minimized`）顺序拉起 `autostart=1` 的模型。
+- **思考模式**：`local_models.thinking`（V21，默认 1）总是显式映射为 `--reasoning on|off`；运行中修改下次启动生效（同 `ctx_size` / `n_gpu_layers`）。
+- **路由优先级**：组合 > 私有（`tier='local'`）> 云。`resolve_route_candidates()` 把本地模型排前；组合先展开成员，成员内部同样遵循此优先级。
+- **管理面隔离**：`/api/providers` 不返回 `local-*` provider；`/api/models` 与 `/api/keys` 仍返回全部记录（组合成员选择器与白名单需要看到私有模型）。
 
+## 输入 / 输出
 | 端点 | 功能 |
 |------|------|
-| `GET /api/local/models` | 列出本地模型（含运行状态/健康/端口） |
-| `POST /api/local/models` | 注册本地模型（GGUF 文件路径 + 引擎参数） |
-| `POST /api/local/models/:id/edit` | 编辑参数（别名、上下文长度、GPU 层、后端、自启动、思考模式） |
-| `DELETE /api/local/models/:id` | 停止并删除注册 |
-| `POST /api/local/models/:id/start` / `/stop` | 引擎生命周期控制 |
+| `GET /api/local/models` | 列出本地模型（含运行状态/端口） |
+| `POST /api/local/models` | 导入本地 GGUF（`local_path` 必填）+ 引擎参数 |
+| `POST /api/local/models/:id/edit` | 编辑参数（别名、ctx、GPU 层、后端、自启动、思考模式） |
+| `DELETE /api/local/models/:id` | 停止 → 删 provider（级联 models/keys）→ 删记录 → 可选删权重 |
+| `POST /api/local/models/:id/start` / `/stop` | 引擎生命周期 |
 | `GET /api/local/backends` | GPU 后端检测结果 |
 
-## 行为约束
+- 引擎未就绪时请求该模型 → provider 不可用，走 failover 或返回错误（与普通上游不可达同语义）。
+- `/v1/models` 中本地模型与云端模型统一呈现（tier=`local`）。
 
-- **引擎生命周期（PRD §10.2）**：
-  - 启动后健康检查轮询直至就绪或超时报错；进程退出后按「崩溃重启」策略拉起。
-  - 「自启动」开关：应用启动（含 `--minimized`）时自动拉起标记为自启动的模型。
-  - 停止模型必须回收子进程与端口占用。
-- **导入本地权重**：`POST /api/local/models` 携带 `local_path`——校验文件存在且为
-  `.gguf` → 拷贝到应用数据目录（models/{id}/model.gguf）→ 直接 `status=downloaded`；
-  拷贝失败不产生半成品记录。前端入口为私有智能页「导入权重」按钮，文件选择走 Tauri dialog
-  插件（仅桌面端可用）。用户需自行从 HuggingFace 或其他来源下载 GGUF 文件。
-- **端口**：默认自动分配，冲突时顺延；编辑后重启生效。
-- **思考模式**：`local_models.thinking`（V21，0/1，默认 1）持久化用户开关；引擎启动时总是
-  显式映射为 `llama-server --reasoning on|off`（不走 auto 第三态，保证开关状态与引擎一致）。
-  新建模型默认开启；引擎运行中修改需下次启动生效（同 ctx_size / n_gpu_layers）。
-- **路由优先级**：组合 > 私有智能 > 云智能。`resolve_route_candidates()` 按 `tier='local'` 优先排序，
-  同名模型本地引擎优先于云端 Provider。组合别名解析（`resolve_combo()`）先展开成员，成员内部同样遵循此优先级。
-- **管理面隔离**：`/api/providers` 不返回 `local-*` provider（云智能页面不显示本地引擎），但
-  `/api/models` 和 `/api/keys` 仍返回全部记录（组合成员选择器和密钥白名单需要看到私有模型）。
-  本地模型创建/编辑时通过 `alias_taken()` 检查名称冲突（同时检查 models 表和 combos 表）。
-- **删除语义**：删除注册默认保留已导入的 GGUF 文件（磁盘清理由用户显式操作）。
+## 约束
+- 不适用：本模块无此项。
 
-## 输出契约
-
-- 引擎未就绪时请求该模型的代理路径 → 与普通上游不可达同语义（触发 failover/错误返回）。
-- `/v1/models` 中本地模型与云端模型统一呈现（见 module-proxy-handler）。
-
-## 错误处理
-
+## 边界条件
 | 情况 | 行为 |
 |------|------|
-| 引擎二进制缺失/下载失败 | 明确错误信息，不静默降级 |
-| 端口占用、启动超时 | 记录日志并返回可展示的错误 |
-| GGUF 文件不存在或格式错误 | 导入失败，返回错误信息 |
+| 文件不存在 / 非 `.gguf` | 导入失败并返回原因 |
+| 名称与现有模型或组合冲突 | 返回「模型名已被占用」 |
+| 引擎二进制下载/解压失败 | 该后端启动失败，继续下一后端；全部失败返回错误 |
+| 启动超时（120s） | 返回错误并附引擎日志路径 |
+| 崩溃 | 退避重启 ≤3 次，失败后状态 `error` |
 
-## 实现位置
+## 验收标准
+- 不适用：本模块无此项。
 
+## 完成定义
 - Rust：`src-tauri/src/local/{mod,engine,backend}.rs` + `api/handlers/local.rs` + `db/local_models.rs`
 - 前端：`src/views/LocalModelsView.tsx`、`src/stores/localModels.ts`
-- 表结构：见 module-database（`local_models`，V20）
+- 表结构：见 module-database（`local_models`，V20/V21）
+- 下载走统一 `http::build_http_client()`
 
-## 测试要求
-
-- 注册 → 启动 → 健康检查 → 代理请求全链路冒烟。
-- 崩溃重启、自启动恢复、停止回收的进程级验证。
-
-## 完成标准
-
-- [x] GGUF 文件导入，状态可见
-- [x] 引擎自动下载、启动/停止/崩溃重启/自启动
-- [x] GPU 后端自动检测并可手动覆盖
-- [x] 注册后以普通 Provider 语义参与网关路由与统计
+- [x] GGUF 导入（校验 + 拷贝 + 回滚），状态可见
+- [x] 引擎下载、启动/停止、120s 健康检查、5s/15s/45s 崩溃重启（最多 3 次）
+- [x] 自启动恢复
+- [x] GPU 后端检测 + auto 降级 + 手动覆盖
+- [x] `local-{id}` provider / `local-m-{id}` model / `local-k-{id}` key 注册，参与路由与统计

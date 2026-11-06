@@ -1,18 +1,14 @@
 # Spec: 协议转换（IR 中间表示层）
 
-## 目标
-
+## 要构建什么
 通过 IR（Intermediate Representation，中间表示层）实现 Anthropic Messages API、OpenAI Chat Completions API、OpenAI Responses API 三种协议的统一抽象与互转。
 
-## 架构
-
+## 行为
 ```
 客户端格式 → IR (from_*.rs) → 内部处理 → IR (to_*.rs) → 上游/客户端格式
 ```
 
-所有客户端格式先转换为 IR 统一抽象，内部工具（websearch 劫持、usage 追踪、错误构造）只操作 IR 类型，再渲染为目标格式。IR 以 Anthropic Messages 为骨架（内容块模型最丰富），并集覆盖三种格式的全部字段。
-
-## IR 核心类型
+所有客户端格式先转换为 IR 统一抽象，内部逻辑（搜索/抓取/通知工具剔除、session_inject、审计清洗、usage 追踪、错误构造）只操作 IR 类型，再渲染为目标格式。IR 以 Anthropic Messages 为骨架（内容块模型最丰富），并集覆盖三种格式的全部字段。
 
 ### IrRequest（统一请求体）
 
@@ -36,24 +32,25 @@ pub struct IrRequest {
 ```rust
 pub enum IrContentBlock {
     Text { text, cache_control },
-    Image { source, cache_control },
+    Image { source },                     // IrImageSource: Base64{media_type,data} | Url{url}
     Thinking { thinking, signature },
     ToolUse { id, name, input },
     ToolResult { tool_use_id, content, is_error },
 }
 ```
 
-### IrStreamEvent（统一流式事件，6 种变体）
+### IrStreamEvent（统一流式事件，6 种变体，以 Anthropic SSE 为骨架）
 
 ```rust
 pub enum IrStreamEvent {
-    MessageStart { id, model, usage },
-    ContentBlockStart { index, content_block },
-    ContentBlockDelta { index, delta },
+    MessageStart { id, model, usage: Option<IrUsage> },
+    ContentBlockStart { index, block: IrContentBlockStart },   // Text | Thinking{signature} | ToolUse{id,name}
+    ContentBlockDelta { index, delta: IrContentDelta },         // TextDelta | ThinkingDelta | InputJsonDelta
     ContentBlockStop { index },
-    MessageDelta { stop_reason, usage },
+    MessageDelta { stop_reason: Option<IrStopReason>, usage: Option<IrUsage> },
     MessageStop,
 }
+pub enum IrStopReason { EndTurn, ToolUse, MaxTokens }           // 各协议字符串由方法映射
 ```
 
 ### IrUsage（统一 token 统计）
@@ -67,8 +64,6 @@ pub struct IrUsage {
     pub output_chars: u64,
 }
 ```
-
-## 转换模块
 
 ### from_*.rs（客户端格式 → IR）
 
@@ -84,24 +79,22 @@ pub struct IrUsage {
 |------|------|---------|
 | `to_messages.rs` | Anthropic Messages | `message_delta.usage` 补上 `input_tokens` |
 | `to_chat_completions.rs` | OpenAI Chat Completions | `Thinking` → `reasoning_content` |
-| `to_responses.rs` | OpenAI Responses API | IR → Responses output items；function_call 的 `id`/`call_id` 由本层生成 |
+| `to_responses.rs` | OpenAI Responses API | IR → Responses output items；function_call 的 `id`/`call_id` 由本层生成；thinking → reasoning item（summary_text） |
 
 ### usage.rs（token 提取）
 
 从三种协议格式的响应中提取 `IrUsage`：
 - Anthropic Messages：`usage.input_tokens` / `usage.output_tokens` / `usage.cache_read_input_tokens`
-- OpenAI Chat Completions：`usage.prompt_tokens` / `usage.completion_tokens`
+- OpenAI Chat Completions：`usage.prompt_tokens` / `usage.completion_tokens` / `usage.prompt_tokens_details.cached_tokens`
 - OpenAI Responses：`usage.input_tokens` 减去 `input_tokens_details.cached_tokens`（增量口径）
 
-## usage 语义
+`estimate_input_tokens()`（chars/4）供 message_start 占位与大上下文响应头超时估算。
 
 | 项 | 规则 |
 |----|------|
 | 合并策略 | **真实值覆盖估算占位**（不用 max）——`forward.rs` 预填的 `chars/4` 估算值偏大，max 会永久压住真实值 |
 | Responses input_tokens | 减去 `cached_tokens`，保持增量口径 |
 | message_delta 补全 | IR → Messages 渲染时补上 `input_tokens`（此前缺失） |
-
-## 转换特性矩阵
 
 | 特性 | Anthropic Messages | OpenAI Chat Completions | OpenAI Responses |
 |------|--------------------|-------------------------|-----------------|
@@ -115,17 +108,19 @@ pub struct IrUsage {
 | 缓存 token | ✅ cache_read | ❌ | ✅ input_tokens_details |
 | 图片 | ✅ image block | ✅ image_url | ✅ input_image |
 
-## 关键约束
+## 输入 / 输出
+- 不适用：本模块无此项。
 
-1. **流式转换**: 逐 chunk 实时转换，不缓冲完整响应
-2. **保留未知字段**: 不删除无法识别的字段，原样传递
+## 约束
+1. **流式转换**: 逐 chunk 实时转换；`forward.rs` 只解析 IR 事件并渲染，不缓冲完整响应（非流式由 `non_stream.rs` 自行收集 IR 事件组装，不复用 SSE 渲染）
+2. **字段覆盖边界**: IR 是强类型并集（`IrRequest` 字段见上），**未被建模的字段不会原样透传**；修改协议支持面时必须先扩 `types.rs`
 3. **错误容忍**: 单个 chunk 转换失败不影响整个流
 4. **thinking 字段**: thinking/reasoning_content 双向转换，内容原样传递（无截断）
 5. **usage 真实值覆盖**: 上游真实 usage 覆盖 `forward.rs` 预填的估算占位
-6. **Responses 工具调用**: function_call item 的 `id`（`fc_*`）与 `call_id`（`call_*`）都由渲染层生成，added/done 一致；对应上游 tool_use id 不回传（见 ADR-059）
+6. **Responses 工具调用**: function_call item 的 `id`（`fc_*`）与 `call_id`（`call_*`）都由渲染层生成，added/done 一致；对应上游 tool_use id 不回传
+7. **server-side 工具归一化**: `from_messages.rs` / `from_responses.rs` 把无 name 的 `web_search_*` 工具归一为 `name="web_search"`，供代理侧剔除检测
 
-## 错误处理
-
+## 边界条件
 | 场景 | 行为 |
 |------|------|
 | 请求格式错误 | 返回 400，不转发 |
@@ -133,8 +128,14 @@ pub struct IrUsage {
 | 未知字段 | 原样传递 |
 | 转换失败 | 记录 warn 日志，继续处理 |
 
-## 实现位置
+## 验收标准
+1. **单元测试**: 每个转换函数的输入输出
+2. **集成测试**: 完整请求-响应流程
+3. **边界测试**: 空消息、多工具调用、thinking 双向转换
+4. **流式测试**: 逐 chunk 转换的正确性
+5. **usage 测试**: 真实值覆盖估算、Responses 增量口径、无缓存场景、全缓存场景
 
+## 完成定义
 - `src-tauri/src/api/proxy/ir/types.rs` — IR 类型定义（IrRequest / IrMessage / IrContentBlock / IrStreamEvent / IrUsage）
 - `src-tauri/src/api/proxy/ir/from_messages.rs` — Anthropic Messages → IR
 - `src-tauri/src/api/proxy/ir/from_chat_completions.rs` — OpenAI Chat Completions → IR
@@ -143,16 +144,6 @@ pub struct IrUsage {
 - `src-tauri/src/api/proxy/ir/to_chat_completions.rs` — IR → OpenAI Chat Completions
 - `src-tauri/src/api/proxy/ir/to_responses.rs` — IR → OpenAI Responses API
 - `src-tauri/src/api/proxy/ir/usage.rs` — Token usage 提取（三种格式）
-
-## 测试要求
-
-1. **单元测试**: 每个转换函数的输入输出
-2. **集成测试**: 完整请求-响应流程
-3. **边界测试**: 空消息、多工具调用、thinking 双向转换
-4. **流式测试**: 逐 chunk 转换的正确性
-5. **usage 测试**: 真实值覆盖估算、Responses 增量口径、无缓存场景、全缓存场景
-
-## 完成标准
 
 - [x] Anthropic Messages ↔ IR 双向转换
 - [x] OpenAI Chat Completions ↔ IR 双向转换

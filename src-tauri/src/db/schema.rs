@@ -326,7 +326,7 @@ INSERT INTO settings (key, value) VALUES
 ON CONFLICT(key) DO NOTHING;
 "#,
     // V20: 本地模型（私有化）——GGUF 权重 + llama-server 引擎运行时元数据。
-    // 契约见 docs/specs/spec-local-models.md。
+    // 契约见 docs/specs/module-local-models.md。
     r#"
 CREATE TABLE IF NOT EXISTS local_models (
     id TEXT PRIMARY KEY,

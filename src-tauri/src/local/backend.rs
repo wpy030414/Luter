@@ -1,6 +1,6 @@
 //! 计算后端检测：平台/GPU 探测 → 候选后端优先级列表。
 //!
-//! 契约见 docs/specs/spec-local-models.md。
+//! 契约见 docs/specs/module-local-models.md。
 //! 检测结果缓存（进程生命周期内不变）；`auto` 模式下按优先级降级尝试。
 
 use std::sync::OnceLock;

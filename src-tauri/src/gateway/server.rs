@@ -56,7 +56,7 @@ pub struct AppState {
     pub search_http: crate::search::bing::SearchHttp,
     /// 搜索后端配置（设置页热更新；密钥解密后驻留内存）。
     pub search_config: Arc<std::sync::RwLock<crate::search::SearchConfig>>,
-    /// 本地模型管理（私有化）：下载/引擎/provider 注册。契约见 spec-local-models.md。
+    /// 本地模型管理（私有化）：GGUF 导入/引擎生命周期/provider 注册。契约见 module-local-models.md。
     pub local: LocalManager,
 }
 

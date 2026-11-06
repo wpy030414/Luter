@@ -1,11 +1,9 @@
 # Spec: 用量统计
 
-## 目标
-
+## 要构建什么
 记录每次 LLM 请求的用量信息，提供聚合统计查询，支持前端图表展示。
 
-## Usage 语义
-
+## 行为
 ### 真实值覆盖估算占位
 
 `forward.rs` 在流式转发开始时预填 `chars/4` 估算值（偏大），上游返回真实 usage 时**直接覆盖**（不用 `max()`）：
@@ -47,8 +45,6 @@ IR → Messages 渲染时：
 
 `stream.rs` 检测到上下文超限时仅记录 warn 日志，**不返回 400**——避免阻断客户端 auto-compact（`/compact` 自身也需走代理，硬拒绝会形成死锁）。
 
-## 数据结构
-
 ### usage_log 表
 
 ```sql
@@ -81,10 +77,22 @@ CREATE TABLE usage_log (
 - **删除安全**: 删除 Provider/Model/Key 不影响历史统计
 - **缓存追踪**: `cache_read_input_tokens` 记录缓存命中
 - **真实值**: `prompt_tokens` 为上游真实值（覆盖估算占位后）
+- **配额口径**: `total_tokens` 与 `get_service_key_usage` 一致，均按 `prompt + completion + cache_read` 累加
 - **速度可算**: `first_token_ms`（TTFT，可空）让输出速度按生成窗口口径派生，见下节
 
-## 输入契约
+- **两张独立表，互不引用**：`usage_log` 只记量化指标（不存消息内容），`conversations` 存会话消息（见 module-conversation-audit.md）。
+- 写入时机不同：`usage_log` 每次请求一条（自包含快照）；`conversations` 按 `fingerprint` 归并、`request_count` 累加。
+- 隐私开关不同：`conversations` 受 `audit_enabled` 控制（默认关）；`usage_log` 始终写入（不含正文）。
+- 共同点：都无外键、删除 Provider/Model/Key 不影响历史记录；都随数据导出 / 重置处理。
+- 数据导出 / 重置均覆盖两表（表清单见 module-database）——新增统计字段时只需扩 `usage_log`，新增会话字段只扩 `conversations`。
 
+```sql
+CREATE INDEX idx_usage_timestamp ON usage_log(timestamp);
+CREATE INDEX idx_usage_provider ON usage_log(provider_id);
+CREATE INDEX idx_usage_service_key ON usage_log(service_key_id);
+```
+
+## 输入 / 输出
 ### 记录用量
 
 ```rust
@@ -128,7 +136,7 @@ pub fn get_usage_by_day_and_key(
 ) -> anyhow::Result<Vec<serde_json::Value>>
 ```
 
-### 请求日志分页（2026-08 新增）
+### 请求日志分页
 
 ```rust
 pub fn get_usage_log_page(page: i64, page_size: i64) -> anyhow::Result<PagedRows>
@@ -139,7 +147,7 @@ pub fn get_usage_log_page(page: i64, page_size: i64) -> anyhow::Result<PagedRows
 - **行字段**: `provider_name` / `model_display_name` / `service_key_name` / `key_masked` / `prompt_tokens` / `completion_tokens` / `latency_ms` / `first_token_ms` / `cache_read_input_tokens` / `success` / `error_message`
 - **HTTP 端点**: `GET /api/stats/requests?page=N&page_size=M` → `{total, page, page_size, data}`（`api/handlers/stats.rs::get_stats_requests`）
 
-### 输出速度（t/s）（2026-10 新增）
+### 输出速度（t/s，DECISIONS.md 速查表条目 055）
 
 请求日志「输出 Tokens」单元格次行展示本次请求的吐字速度，格式 `<整数> t/s`（如 `42 t/s`）。
 
@@ -153,8 +161,6 @@ pub fn get_usage_log_page(page: i64, page_size: i64) -> anyhow::Result<PagedRows
   `formatSpeed`；速度 < 1 时保留 1 位小数，避免取整显示 `0 t/s`。
 - **表头提示**: `stats.log.col_output_hint`（zh-CN / en 双语 key）说明计算口径。
 
-## 输出契约
-
 统计查询返回 `Vec<serde_json::Value>`（使用 `json!({})` 宏构建，无强类型结构体）。
 
 ### 统计维度
@@ -167,7 +173,7 @@ SELECT
     SUM(prompt_tokens) as prompt_tokens,
     SUM(completion_tokens) as completion_tokens,
     SUM(cache_read_input_tokens) as cache_read_input_tokens,
-    SUM(prompt_tokens + completion_tokens) as total_tokens,
+    SUM(prompt_tokens + completion_tokens + cache_read_input_tokens) as total_tokens,
     COUNT(*) as requests,
     CAST((timestamp + ?) / ? AS INTEGER) as bucket
 FROM usage_log
@@ -191,8 +197,11 @@ ORDER BY requests DESC
 LIMIT 1
 ```
 
-## 关键约束
+### 实时刷新
 
+`gateway/server.rs` 有一个后台 task，每 **5s** 经 `/ws` 广播 `{"type":"usage_stats_changed","timestamp":...}`；StatsView / ServiceKeysView / AuditView 订阅后重新拉取各自接口（前端另有兜底轮询）。广播只带时间戳，不携带数据。
+
+## 约束
 1. **写入性能**: 每次请求都写一条记录，需要高效插入
 2. **查询性能**: 大量历史数据时，聚合查询需要索引
 3. **时区处理**: 使用 `tz_offset` 参数调整时区
@@ -200,31 +209,14 @@ LIMIT 1
 5. **无外键**: 删除 Provider/Model/Key 不影响统计
 6. **真实值覆盖**: `prompt_tokens` 记录上游真实值，不记录偏大的 `chars/4` 估算值
 
-## 索引
-
-```sql
-CREATE INDEX idx_usage_timestamp ON usage_log(timestamp);
-CREATE INDEX idx_usage_provider ON usage_log(provider_id);
-CREATE INDEX idx_usage_service_key ON usage_log(service_key_id);
-```
-
-## 错误处理
-
+## 边界条件
 | 场景 | 行为 |
 |------|------|
 | 插入失败 | 记录 warn 日志，不影响请求响应 |
 | 查询失败 | 返回空结果 |
 | 无数据 | 返回空数组，`top_model` 为 null |
 
-## 实现位置
-
-- `src-tauri/src/db/usage.rs` - 插入和查询逻辑
-- `src-tauri/src/api/handlers/stats.rs` - HTTP API 处理
-- `src-tauri/src/api/proxy/stream.rs` - 异步记录用量（真实值覆盖后）
-- `src-tauri/src/api/proxy/ir/usage.rs` - usage 提取 + 增量口径
-
-## 测试要求
-
+## 验收标准
 1. **单元测试**: 插入逻辑、查询逻辑
 2. **集成测试**: 完整统计流程（写入 + 查询）
 3. **性能测试**: 大量数据插入和查询的性能
@@ -234,7 +226,12 @@ CREATE INDEX idx_usage_service_key ON usage_log(service_key_id);
    `first_token_ms` 写读往返（Some → 数字 / None → null）；E2E 假上游埋「首字延迟 +
    生成期」两段 sleep，实测流式与非流式两条路径的 TTFT 与生成窗口
 
-## 完成标准
+## 完成定义
+- `src-tauri/src/db/usage.rs` - 插入和查询逻辑
+- `src-tauri/src/api/handlers/stats.rs` - HTTP API 处理
+- `src-tauri/src/api/proxy/{forward,non_stream}.rs` - 转发完成后记录用量 + TTFT 打点（`is_generation_delta`）
+- `src-tauri/src/db/conversations.rs` - 对话审查存储（与 usage_log 并列的审计表）
+- `src-tauri/src/api/proxy/ir/usage.rs` - usage 提取 + 增量口径
 
 - [x] 每次请求记录 `usage_log`
 - [x] 按 Service Key 分组统计

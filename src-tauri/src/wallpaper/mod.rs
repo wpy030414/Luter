@@ -1,6 +1,6 @@
 //! 桌面壁纸劫持：把 FM 像素艺术渲染到系统桌面层（切换/暂停与主窗口严格同步）。
 //!
-//! # 方案（见 docs/DECISIONS.md ADR-041/043）
+//! # 方案（见 docs/DECISIONS.md ADR-001/002）
 //!
 //! 动态创建第二个 WebviewWindow（label=`wallpaper`，`transparent(true)` +
 //! `initialization_script` 注入 `__WALLPAPER_MODE__`，前端分支渲染

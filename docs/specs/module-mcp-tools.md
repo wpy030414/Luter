@@ -1,23 +1,20 @@
 # Spec: MCP 工具端点（/mcp）
 
-> 取代 `spec-websearch-hijack.md`（server-side 劫持 + tool-calling loop 已删除）。
+## 要构建什么
+- 不适用：本模块无此项。
 
-## 概述
-
+## 行为
 网关在现有单 listener（`0.0.0.0:19068`）上暴露一个 **MCP（Model Context Protocol）Streamable HTTP 端点** `/mcp`，对外提供三个工具。客户端（如 Claude Code）注册该端点后，模型通过标准 MCP tool-calling 调用本地搜索与网页抓取能力——不再由代理跑 server-side 劫持循环。
 
-设计动机与选型见 `docs/DECISIONS.md`（「从 server-side 劫持迁移到本地 MCP」等三条决策）。
-
-## 端点契约
+设计动机与选型见 `docs/DECISIONS.md`。
 
 - **路径**：`/mcp`（公开区，不走 `admin_ip_guard`；挂 Service Key 鉴权，安全模型同 `/v1/*`）。
 - **传输**：Streamable HTTP（`rmcp` 官方 SDK 的 `StreamableHttpService`），无会话模式（`NeverSessionManager` + `legacy_session_mode = false`）——工具只读、无服务端推送，无需 MCP 会话。
 - **方法**：`any` 路由覆盖 POST（JSON-RPC）/ GET / DELETE；rmcp 负责协议内其余请求的 405/400 处理。
 - **鉴权**：`Authorization: Bearer <service-key>`，复用 `api/proxy/auth.rs::verify_service_key`（argon2）。缺失或无效 → 401 JSON。
 - **开关全关时**：协议请求仍正常应答（initialize 成功、`tools/list` 返回空数组），保证已注册客户端连接不报错。
+- **请求体上限**：路由层未单独设置 `DefaultBodyLimit`，使用 axum 默认 **2 MiB**（JSON-RPC 帧很小）。
 - **缓存提示（SEP-2549）**：协议修订版 `2026-07-28` 把 `ttlMs` / `cacheScope` 列为列表结果（`tools/list` 等）的**必填**字段。rmcp 3.x 仅在 `#[tool_router]` 宏生成的路径上补发，本项目为按开关动态过滤而手写 `ServerHandler`，必须在 `list_tools` 里按协商版本条件补发，否则严格校验该修订版的客户端（Claude Code ≥2.1.x）判定结果非法（`Invalid result for tools/list`），内置工具全部不可用。取值固定 `ttlMs = 0` + `cacheScope = private`（工具列表受运行时开关控制，不可缓存；与 `DiscoverResult::new` 表达「不可缓存」的方式一致）。
-
-## 工具定义
 
 ### `web_search`（受 `mcp_websearch` 开关控制）
 
@@ -119,10 +116,14 @@ URL: https://example.com/2
 - **解析后**：域名先 DNS（3s 超时）解析，任一地址命中私有段即拒绝。
 - **重定向**：静态 client 的 `Policy::custom` 与渲染窗口的 `on_navigation` 逐跳复查
   字面量。
-- **已知边界**：检查与连接之间的 DNS rebinding 窗口不设防（单用户桌面场景取舍，
-  见 ADR-056）。局域网地址一律拦截——`web_fetch` 不承担内网探测职责。
+- **已知边界**：检查与连接之间的 DNS rebinding 窗口不设防（本机部署的取舍，
+  见 DECISIONS.md 速查表条目 056）。局域网地址一律拦截——`web_fetch` 不承担内网探测职责。
 
-## 开关语义（设置页「路由」Tab）
+### `notify`（受 `mcp_notify` 开关控制）
+
+- **参数**：`title`（required）、`body`（optional）、`sound`（optional）。
+- **实现**：`mcp/notify.rs` 经 `tauri-plugin-notification` 弹系统通知；`sound` 省略或 `"default"` 用系统默认声，否则按平台传声音名（macOS `/System/Library/Sounds/`、Linux freedesktop sound-name、Windows toast 声音）。AppHandle 由 `mcp::init()` 注入。
+- **副作用**：代理侧开关 ON 时剔除客户端自带的原生通知工具（如 `PushNotification`、`send_notification`）并向 system 注入提示，引导模型改用本地 `notify`（见下节）。
 
 | 设置键 | 默认 | 效果 |
 |--------|------|------|
@@ -131,21 +132,42 @@ URL: https://example.com/2
 | `mcp_notify` | `false` | ON：`/mcp` 提供 `notify`（系统桌面通知）；OFF：不提供 |
 | `webfetch_jina_fallback` | `false` | ON：web_fetch 本地静态 + 渲染都失败时走 Jina Reader（第三方）；OFF：只报错 |
 
-持久化：`settings` 表（`mcp_websearch` / `mcp_webfetch`），AppState 原子量运行时读写，`/api/settings` GET/PUT。
+持久化：`settings` 表（四个键），AppState 原子量运行时读写，`/api/settings` GET/PUT。`tools/list` 每次请求实时读取开关（不存在服务端缓存列表）。
 
-## 代理侧剔除逻辑（`stream.rs`）
+`proxy_stream()` 在 `client_wants_stream` 分支**之前**执行，三条路径效果一致：
 
-`proxy_stream()` 入口：`mcp_websearch` ON 时调 `strip_search_tools(&mut ir_request)`：
+| 开关 | 动作 |
+|------|------|
+| `mcp_websearch` | `strip_search_tools`：移除 `web_search*` 前缀与大小写不敏感 `WebSearch` 命名的工具；`tool_choice` 指向被移除工具时改写为 `Auto` |
+| `mcp_webfetch` | `strip_fetch_tools`：移除客户端内置抓取（`WebFetch`）与上游 `web_fetch_*` 类工具 |
+| `mcp_notify` | `strip_notify_tools`（移除 `PushNotification` / `send_notification` 等）+ `inject_notify_hint`（向 system 注入「必须使用本地 notify」提示） |
 
-1. 移除所有搜索类工具（`is_search_tool_name`：`web_search*` 前缀 + 大小写不敏感 `WebSearch`）。
-2. `tool_choice` 若指向被移除的搜索工具 → 改写为 `Auto`（代理不再注入工具，无可改写目标）。
-
-> 与旧劫持的区别：只剔除、不注入、不跑循环。模型联网搜索走客户端注册的 MCP 工具。
+> 只剔除 / 注入提示，不注入工具、不跑循环。模型联网搜索与抓取走客户端注册的 MCP 工具。
 
 server-side 工具归一化（`from_messages.rs` / `from_responses.rs`：`web_search_*` 无 name → `name="web_search"`）保留，剔除检测依赖它。
 
-## 实现位置
+- `rmcp`（MCP Rust SDK）：`server` + `macros` + `transport-streamable-http-server`。
+- Tauri 内置 WebView（`tauri::WebviewWindow` + `eval_with_callback`）——无额外浏览器依赖。
+- `htmd`（HTML → Markdown）。
+- `pdf-extract`（PDF 文本层提取，纯 Rust）。
+- `scraper`（HTML CSS 选择器解析，readability 提取复用）+ `ego-tree`（scraper 的 DOM 树类型 NodeId/NodeMut，原地 detach 修剪）+ `encoding_rs`（非 UTF-8 中文页面 GBK/GB2312 解码）。
 
+> rmcp 的 `StreamableHttpService` 泛型接受任意 `http_body::Body`，返回 `BoxBody`，可直接嵌入 axum 0.7 handler，无需升级 0.8。
+
+## 输入 / 输出
+- 不适用：本模块无此项。
+
+## 约束
+- 不适用：本模块无此项。
+
+## 边界条件
+- 不适用：本模块无此项。
+
+## 验收标准
+1. **单元测试**：工具按开关过滤（三开关 8 组合核心子集）、工具 schema 字段、搜索结果格式化、URL 归一化、输出截断、HTML→Markdown。
+2. **集成**：`/mcp` 鉴权（无/错误 key → 401）、initialize / tools/list / tools/call 往返（手工 JSON-RPC POST）。
+
+## 完成定义
 - `src-tauri/src/mcp/mod.rs` — `/mcp` handler（鉴权 + 委托）+ 全局服务单例 + `init()` 注入 AppState 与 AppHandle。
 - `src-tauri/src/mcp/tools.rs` — `ServerHandler` 实现（`list_tools` 按开关动态过滤 / `call_tool` 分发）+ 工具 schema + `format_search_text`。
 - `src-tauri/src/mcp/fetch.rs` — 静态优先抓取链 + 内容缓存 + 渲染池 + 内容类型分支 + 分段输出。
@@ -164,27 +186,12 @@ server-side 工具归一化（`from_messages.rs` / `from_responses.rs`：`web_se
 - `src-tauri/src/api/router.rs` — `/mcp` 路由注册。
 - `src/views/SettingsView.tsx` — 三个开关 + MCP 接入信息卡（端点 + 注册命令 + 复制）。
 
-## 依赖
-
-- `rmcp`（MCP Rust SDK）：`server` + `macros` + `transport-streamable-http-server`。
-- Tauri 内置 WebView（`tauri::WebviewWindow` + `eval_with_callback`）——无额外浏览器依赖，见 ADR-038。
-- `htmd`（HTML → Markdown）。
-- `pdf-extract`（PDF 文本层提取，纯 Rust）。
-- `scraper`（HTML CSS 选择器解析，readability 提取复用）+ `ego-tree`（scraper 的 DOM 树类型 NodeId/NodeMut，原地 detach 修剪）+ `encoding_rs`（非 UTF-8 中文页面 GBK/GB2312 解码）。
-
-> rmcp 的 `StreamableHttpService` 泛型接受任意 `http_body::Body`，返回 `BoxBody`，可直接嵌入 axum 0.7 handler，无需升级 0.8。
-
-## 测试要求
-
-1. **单元测试**：工具按开关过滤（三开关 8 组合核心子集）、工具 schema 字段、搜索结果格式化、URL 归一化、输出截断、HTML→Markdown。
-2. **集成**：`/mcp` 鉴权（无/错误 key → 401）、initialize / tools/list / tools/call 往返（手工 JSON-RPC POST）。
-
-## 完成标准
-
 - [x] `/mcp` Streamable HTTP 端点 + Service Key 鉴权
-- [x] `web_search` / `web_fetch` 工具，按开关动态过滤 `tools/list`
+- [x] `web_search` / `web_fetch` / `notify` 三工具，按开关实时过滤 `tools/list`
+- [x] `web_fetch` 批量（≤8，并发 3）+ `start_index` 分段 + Jina 兜底开关
 - [x] WebFetch 用 Tauri 内置 WebView 渲染（隐藏窗口 + eval 提取 + 静态回退）
-- [x] 代理侧搜索工具剔除（`mcp_websearch` ON）
+- [x] 代理侧三开关剔除（搜索 / 抓取 / 通知）+ notify 提示注入
+- [x] SSRF 守卫（`net_guard.rs` 字面量 + DNS + 重定向逐跳复查）
 - [x] 删除旧劫持循环（`websearch.rs` + `forward_stream_ir_to_buffer` + `accumulate_ir_events` + 卡片渲染）
 - [x] 设置开关 + DB 迁移 V16 + 前端 UI（两开关 + 接入信息卡）
 - [x] 文档同步（本 spec + ARCHITECTURE + PRD + DECISIONS + AGENTS + README）

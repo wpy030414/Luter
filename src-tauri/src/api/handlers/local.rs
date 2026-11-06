@@ -1,7 +1,7 @@
 //! 本地模型（私有化）管理 API：模型导入 / 启停 / 后端检测。
 //!
 //! 全部挂在 `/api/local/*` 下，受 `admin_ip_guard` 保护（仅 loopback）。
-//! 契约见 docs/specs/spec-local-models.md。
+//! 契约见 docs/specs/module-local-models.md。
 
 use std::sync::Arc;
 

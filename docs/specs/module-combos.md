@@ -1,11 +1,9 @@
 # Spec: 组合别名（Combo）
 
-## 目标
-
+## 要构建什么
 允许用户把多个模型别名（`models.display_name`）按顺序捆绑成一个新的「组合别名」。客户端用组合别名连接路由时，路由按成员顺序依次尝试，直到找到可用模型——相当于显式构建的退路链。
 
-## 数据模型（V18）
-
+## 行为
 ```sql
 CREATE TABLE combos (
     id TEXT PRIMARY KEY,
@@ -35,8 +33,6 @@ CREATE TABLE combo_members (
   - 大小写敏感（SQLite BINARY 排序规则）：`"MyCombo" ≠ "mycombo"`。
   - 并发 TOCTOU 由 `combos.name UNIQUE` 兜底（rusqlite 2067 → 400 "name already exists"）。
 
-## 解析与回退语义
-
 ### 展开（`api/proxy/route.rs::resolve_combo`）
 
 - `None` → 名字不是 **enabled** 组合（不存在或被禁用）→ 调用方回落普通别名解析（向后兼容：任何非组合名走原路径）。
@@ -47,7 +43,7 @@ CREATE TABLE combo_members (
 
 ### 回退触发（`api/proxy/stream.rs` 双循环）
 
-组合命中后强制 `failover = true`（`global_failover || is_combo_req`；全局开关已恒开，组合语义不变）——**成员间回退总是生效**。外层循环所有 `continue 'provider` 门（冷却跳过、密钥耗尽、网络错误、响应头超时、5xx）自动生效。
+组合命中后候选列表即全部成员展开（`is_combo_req` 保留标记用于日志/统计；`failover_enabled` 已恒为 `true`）——**成员间回退总是生效**。外层循环所有 `continue 'provider` 门（冷却跳过、密钥耗尽、网络错误、响应头超时、5xx）自动生效。
 
 | 上游行为 | 分类 | 组合处理 |
 |---|---|---|
@@ -73,8 +69,6 @@ CREATE TABLE combo_members (
 
 追加 enabled 组合条目（`id`/`display_name`=组合名、`owned_by:"combo"`、`tier:"combo"`、数值字段 0/空数组）。不校验运行时可解析性（只列 enabled 组合），解析失败时调用方在请求时收到 400。白名单过滤按 `display_name` 天然覆盖。
 
-## 管理 API 契约
-
 `GET/POST /api/combos`、`GET/PUT/DELETE /api/combos/:id`（仅 loopback，参照 `/api/models`）。
 
 ### POST /api/combos
@@ -94,21 +88,15 @@ CREATE TABLE combo_members (
 
 错误码：不存在 → 404；冲突/未知成员/空成员 → 400；`save_combo` 返回 UNIQUE 违例（2067）→ 400；其他 DB 错误 → 500。
 
-## 统计口径
-
 `usage_log` 零改动：`model_display_name` = 客户端请求用的别名（即组合名），`model_id` = 实际命中的成员模型行。因此：
 
 - `top_model` 按 `model_id` 聚合 → 组合用量计入**实际成员模型**。
 - 请求日志 `model_display_name` 显示组合名。
 
-## 管理 UI
-
 - 侧边栏「供应商」下方新增「组合」入口（`nav.combos`，mdiSetMerge）。
 - `CombosView.tsx`：卡片列表（组合名 + 禁用 chip + 带序号成员 chips + 编辑/删除菜单）。
 - `ComboFormView.tsx`：名称 + 按 provider 分组的成员多选（勾选顺序 = 尝试顺序，可上移/下移/移除）+ 启用开关。
 - `KeysView` 权限对话框：组合独立分组。
-
-## 测试矩阵
 
 | 场景 | 期望 |
 |---|---|
@@ -119,6 +107,7 @@ CREATE TABLE combo_members (
 | 成员全部不可解析 | `Some(vec![])` → 400 |
 | 成员别名被删/禁用 | 运行时跳过该成员 |
 | 插件离线的委托成员 | 跳过（继承 `resolve_route_candidates` 语义） |
+| 本地模型成员 | `tier='local'` 在成员内部候选排序中优先（继承路由语义） |
 | 组合 5xx | 仍换成员（强制回退） |
 | 组合 + 普通 400 | 立即透传错误体，不换成员 |
 | 组合 + 400 配额错误 | 换成员 |
@@ -128,8 +117,19 @@ CREATE TABLE combo_members (
 | 组合名撞 display_name / 反向 | 创建/更新被 400 拒绝 |
 | 数据导出/重置 | combos / combo_members 在表清单中 |
 
-## 实现位置
+## 输入 / 输出
+- 不适用：本模块无此项。
 
+## 约束
+- 不适用：本模块无此项。
+
+## 边界条件
+- 不适用：本模块无此项。
+
+## 验收标准
+- 不适用：本模块无此项。
+
+## 完成定义
 - `src-tauri/src/db/schema.rs` - V18 迁移
 - `src-tauri/src/db/combos.rs` - CRUD（save_combo 事务重插成员）
 - `src-tauri/src/api/proxy/route.rs` - `resolve_combo` + 单测
@@ -138,8 +138,6 @@ CREATE TABLE combo_members (
 - `src-tauri/src/api/handlers/models.rs` - display_name 反向冲突校验
 - `src/views/CombosView.tsx` / `ComboFormView.tsx` - 管理 UI
 - `src-tauri/src/gateway/server.rs` - `test_combo_end_to_end` E2E
-
-## 完成标准
 
 - [x] V18 迁移 + combos / combo_members CRUD（含事务重插、级联删除测试）
 - [x] `resolve_combo` 展开 + 单测（顺序/去重/跳过/禁用/空）

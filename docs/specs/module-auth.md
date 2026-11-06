@@ -1,14 +1,12 @@
 # Spec: 认证系统
 
-## 目标
-
+## 要构建什么
 实现双层认证：Service Key（客户端访问）+ Provider API Key（上游调用）。
 
-## Service Key
-
+## 行为
 ### 用途
 
-客户端访问 `/v1/messages`、`/v1/chat/completions`、`/v1/models` 的凭证。
+客户端访问 `/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/models`、`/v1/user/balance` 以及 MCP 端点 `/mcp` 的凭证。原始 key 形如 `xrl-<32 位 hex>`，**创建时仅返回一次**，之后只显示 `****<末 4 位>`。
 
 ### 存储格式
 
@@ -62,13 +60,11 @@ pub fn verify_service_key(raw_key: &str, hash: &str) -> Result<bool> {
 }
 ```
 
-**注意**: 需要逐条遍历所有 Service Key（无法索引查找）。
-
-## Provider API Key
+**注意**: 需要逐条遍历所有 Service Key（加盐哈希不可索引，`idx_service_keys_hash` 实际无法用于查找）。
 
 ### 用途
 
-调用上游 LLM API（Anthropic、OpenAI）的凭证。
+调用上游 LLM API（Anthropic / OpenAI / Responses 协议，含本地 `llama-server`；插件委托 provider 不使用真实密钥，见 module-plugin-system.md）的凭证。
 
 ### 存储格式
 
@@ -77,14 +73,16 @@ CREATE TABLE api_keys (
     id TEXT PRIMARY KEY,
     provider_id TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
-    key_hash TEXT NOT NULL,        -- AES-256-GCM 加密（列名历史遗留，实际是密文）
+    key_hash TEXT NOT NULL,        -- AES-256-GCM 密文 base64(nonce||ct)（列名历史遗留）
     key_masked TEXT NOT NULL,      -- 脱敏显示
+    status TEXT NOT NULL DEFAULT 'unknown',  -- V5 后不读写，健康状态纯内存
+    last_used_at INTEGER, balance REAL, ...
     created_at INTEGER NOT NULL,
     FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
 );
 ```
 
-**注意**: `key_hash` 列名是历史遗留，实际存储 AES 密文（不是哈希）。解密失败时**跳过该 key**（记录 warn 日志，不入池），不回退到密文（避免把密文当 key 发给上游，见 ADR-024）。
+**注意**: `key_hash` 列名是历史遗留，实际存储 AES 密文（不是哈希）。解密失败时**跳过该 key**（记录 warn 日志，不入池），不回退到密文（避免把密文当 key 发给上游，见 `keys/pool/persistence.rs::load_keys_from_db`——解密失败 `warn` 后 `filter_map` 跳过）。
 
 ### 加密算法
 
@@ -96,7 +94,7 @@ pub fn encrypt(plaintext: &str, master_key: &[u8]) -> Result<String> {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref())?;
     
-    // nonce || ciphertext
+    // base64(nonce(12B) || ciphertext)
     let mut result = nonce.to_vec();
     result.extend_from_slice(&ciphertext);
     Ok(BASE64.encode(&result))
@@ -104,12 +102,12 @@ pub fn encrypt(plaintext: &str, master_key: &[u8]) -> Result<String> {
 ```
 
 **主密钥**:
-- 位置: `master.key` 文件
-- 权限: `0600`（仅所有者读写）
-- 生成: 首次启动时随机生成
+- 位置: 数据目录下 `master.key`
+- 内容: 32 字节随机数的 base64
+- 权限: `0600`（仅 unix）
+- 生成: 首次启动时 `OsRng` 随机生成
 
-## 输入契约
-
+## 输入 / 输出
 ### Service Key 认证
 
 ```rust
@@ -135,8 +133,6 @@ pub fn create_service_key(
 
 **返回**: 原始 key（仅一次可见）
 
-## 输出契约
-
 ### ServiceKeyInfo
 
 ```rust
@@ -152,47 +148,41 @@ pub struct ServiceKeyInfo {
 
 ### 认证流程
 
-1. 提取 `x-api-key`（Anthropic 端点优先）或 `Authorization: Bearer`（OpenAI 端点优先）头
-2. 遍历所有 Service Key
-3. 逐条调用 `verify_service_key`
-4. 匹配成功返回 `ServiceKeyInfo`
-5. 检查 5h/7d 滚动窗口配额（`quota.rs::check_quota`），超限返回 429
-6. 检查 `allowed_models` 白名单
+1. 提取 `Authorization: Bearer <key>`，回退 `x-api-key`
+2. 读取 `service_keys` 全表并逐条 Argon2 校验，首个匹配返回 `ServiceKeyInfo`
+3. `check_quota`：5h/7d 滚动窗口；**先判 7d 再判 5h**（两者都超时按 7d 报，`retry-after` 取窗口对齐后的剩余秒数）
+4. `allowed_models` 白名单（空 = 不限）
+5. 同一条链路被 `/v1/*` 与 `/mcp` 共用（`verify_service_key` 为 `pub(crate)`）
 
-## 关键约束
-
+## 约束
 1. **Service Key 不可逆**: Argon2 哈希，无法解密
 2. **Provider Key 可逆**: AES-256-GCM 加密，需要解密后发送
 3. **主密钥保护**: `master.key` 文件丢失则所有 Provider Key 不可恢复
 4. **逐条验证**: Service Key 需要遍历所有记录（性能瓶颈）
 5. **白名单**: `allowed_models` 为空时允许所有模型
 
-## 错误处理
-
+## 边界条件
 | 场景 | 行为 |
 |------|------|
-| 无 `x-api-key` 头 | 返回 401 |
+| 无认证头 / key 为空 | 返回 401 |
 | Service Key 无效 | 返回 401 |
 | 模型不在白名单 | 返回 403 |
 | 滚动窗口配额超限 | 返回 429（`quota_error` + `retry-after`） |
 | 主密钥文件丢失 | 启动失败 |
-| Provider Key 解密失败 | 跳过该 key，记录 error 日志 |
+| Provider Key 解密失败 | 跳过该 key，记录 warn 日志，不入池 |
 
-## 实现位置
-
-- `src-tauri/src/crypto/mod.rs` - 加密/哈希算法
-- `src-tauri/src/api/proxy/auth.rs` - Service Key 认证
-- `src-tauri/src/api/handlers/service_keys.rs` - Service Key CRUD
-
-## 测试要求
-
+## 验收标准
 1. **单元测试**: Argon2 哈希/验证、AES-256-GCM 加密/解密
 2. **集成测试**: Service Key 创建 + 认证、白名单检查
 3. **安全测试**: 暴力破解抵抗、彩虹表抵抗
 
-## 完成标准
+## 完成定义
+- `src-tauri/src/crypto/mod.rs` - 加密/哈希算法
+- `src-tauri/src/api/proxy/auth.rs` - Service Key 认证
+- `src-tauri/src/api/handlers/service_keys.rs` - Service Key CRUD
 
-- [x] Service Key 使用 Argon2id 哈希
+- [x] Service Key 使用 Argon2 哈希（`Argon2::default()`，随机盐）
+- [x] 配额限额持久化在 `service_keys.quota_5h/quota_7d`，已用量按需从 `usage_log` 聚合
 - [x] Provider API Key 使用 AES-256-GCM 加密
 - [x] 主密钥文件保护（权限 0600）
 - [x] 白名单检查（`allowed_models`）
