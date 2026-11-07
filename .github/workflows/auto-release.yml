@@ -26,7 +26,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14 # Apple Silicon runner → arm64 native
+          # macos-latest 当前指向 Apple Silicon（arm64）镜像，原生构建省掉交叉。
+          # 不用固定版本标签：macos-14 等旧标签已被 GitHub 撤下，会报
+          # "The configuration ... is not supported"。
+          - os: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
           - os: windows-latest # x86_64 runner

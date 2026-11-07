@@ -435,11 +435,15 @@ pub fn run() {
             // 菜单栏图标：纯色剪影 + 模板标记，颜色交给系统（浅色菜单栏自动画黑、
             // 深色画白）。不能用 default_window_icon——那是彩色应用图标，
             // 在菜单栏里既看不清也不随主题变色。见 brand::tray。
-            let tray_builder = tauri::tray::TrayIconBuilder::with_id("main-tray")
-                .icon(brand::tray::tray_image())
-                .tooltip("luter");
+            //
+            // brand::tray 仅 macOS 编译（模板图是 NSStatusBar 专属概念），
+            // 其余平台退回应用默认图标。
+            let tray_builder = tauri::tray::TrayIconBuilder::with_id("main-tray");
             #[cfg(target_os = "macos")]
-            let tray_builder = tray_builder.icon_as_template(true);
+            let tray_builder = tray_builder
+                .icon(brand::tray::tray_image())
+                .icon_as_template(true);
+            let tray_builder = tray_builder.tooltip("luter");
             let _tray = tray_builder
                 .menu(&menu)
                 .on_tray_icon_event(|tray, event| {
