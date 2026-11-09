@@ -172,6 +172,9 @@ function useAnimatedStats(aggregated: {
   });
 
   const animationIdRef = useRef<number | null>(null);
+  // 依赖用数值签名而非对象引用：useMemo 每次 rows 变化都会新建 aggregated
+  // 对象，即便数值没变也会重启动画，表现为磁贴数字「原地抖一下」。
+  const target = `${aggregated.totalTokens}|${aggregated.totalRequests}|${aggregated.totalInput}|${aggregated.totalOutput}|${aggregated.totalCache}`;
 
   useEffect(() => {
     if (animationIdRef.current) {
@@ -228,7 +231,7 @@ function useAnimatedStats(aggregated: {
         cancelAnimationFrame(animationIdRef.current);
       }
     };
-  }, [aggregated]);
+  }, [target]);
 
   return display;
 }
@@ -304,28 +307,61 @@ export function StatsView() {
   const [logLoading, setLogLoading] = useState(true);
   const LOG_PAGE_SIZE = 15;
 
+  // ── 请求竞态防护 ──
+  // WebSocket 每 5s 广播一次刷新，慢请求可能在后续请求之后才返回：
+  // 旧响应会覆盖新响应（表现为数字回退、曲线短暂缺段）。每次发起请求
+  // 递增世代号，只有最新世代的结果允许写入 state。
+  const statsSeq = useRef(0);
+  const logSeq = useRef(0);
+  // 防抖定时器在 1s 后才执行，届时闭包里的 timeRange / keyFilter 可能已过期。
+  // 用 ref 钉住最新值，定时器触发时读取的是当前参数而非发起时的参数。
+  const paramsRef = useRef({ timeRange, keyFilter, logPage });
+  paramsRef.current = { timeRange, keyFilter, logPage };
+
+  // ── 时间范围快照 ──
+  // 统计、图表、日志必须用同一组 (from, to)。原先 chartData 在 render 时
+  // 现算 now：刷新回来的桶以旧 to 结尾、图表以新 to 结尾，两者错位就出现
+  // 「数据瞬间清零 / 图形不显示」。这里把每次时间范围切换的时刻冻结下来，
+  // 统计与图表共用，日志沿用同一份。
+  const [bounds, setBounds] = useState(() => getTimeBounds('today'));
+
   const fetchStats = async (range: TimeRange) => {
+    const seq = ++statsSeq.current;
     const { from, to, granularity } = getTimeBounds(range);
+    // tz_offset 用与本次请求同一时刻计算的值，避免跨分钟/跨日边界时
+    // 前端图表与后端桶标签使用不同的偏移。
+    const tzOffsetSec = -getTzOffset() * 60;
+    // 发起时快照筛选条件：响应回来时 keyFilter 可能已被用户改掉，
+    // 用发起时的 keyFilter 与世代号一起判断，避免把旧筛选结果写进新筛选。
+    const keyAtStart = keyFilter;
     try {
       const result = await statsApi.query({
         from,
         to,
         granularity,
-        // getTimezoneOffset() 返回分钟（UTC+8 = -480），转为秒并取负（与 Vue 版一致）
-        tz_offset: -getTzOffset() * 60,
-        service_key_id: keyFilter || undefined,
+        tz_offset: tzOffsetSec,
+        service_key_id: keyAtStart || undefined,
       });
-      setRows(result.data || []);
-      setTopModel(result.top_model || null);
+      // 过期响应直接丢弃：更晚的请求已经发出。
+      if (seq !== statsSeq.current) return;
+      // 只有拿到合法数组才覆盖；异常结构保留旧值，宁可显示上一次的好数据，
+      // 也不把页面刷成 0。
+      if (Array.isArray(result?.data)) {
+        setRows(result.data);
+        setTopModel(result.top_model || null);
+        setBounds({ from, to, granularity });
+      }
     } catch (e: any) {
+      // 失败保留旧 rows：统计抽风「归零」的主要观感来源就是不保留。
       console.error('Failed to fetch stats:', e);
     } finally {
-      setLoading(false);
+      if (seq === statsSeq.current) setLoading(false);
     }
   };
 
   // silent = true：后台定时刷新用，不置 logLoading，避免表格每 5s 闪一次半透明。
   const fetchLog = async (page: number, silent = false) => {
+    const seq = ++logSeq.current;
     if (!silent) setLogLoading(true);
     try {
       // 与统计同源的时间范围：日志也跟随「当天/一天内/…」与密钥筛选
@@ -337,12 +373,15 @@ export function StatsView() {
         to,
         service_key_id: keyFilter || undefined,
       });
-      setLogRows(result.data || []);
-      setLogTotal(result.total);
+      if (seq !== logSeq.current) return;
+      if (Array.isArray(result?.data)) {
+        setLogRows(result.data);
+        setLogTotal(typeof result.total === 'number' ? result.total : 0);
+      }
     } catch (e: any) {
       console.error('Failed to fetch request log:', e);
     } finally {
-      if (!silent) setLogLoading(false);
+      if (!silent && seq === logSeq.current) setLogLoading(false);
     }
   };
 
@@ -359,16 +398,18 @@ export function StatsView() {
     if (refreshTimer.current) return;
     refreshTimer.current = setTimeout(() => {
       refreshTimer.current = null;
-      fetchStats(timeRange);
+      const cur = paramsRef.current;
+      fetchStats(cur.timeRange);
       // 只刷第一页：第 N 页在刷新时会把最新记录顶进前面几页，只有第一页
       // 内容稳定变化；老页刷新反而会因插入导致重复/漏行。
-      if (logPage === 1) fetchLog(1, true);
+      if (cur.logPage === 1) fetchLog(1, true);
     }, 1000);
   }, [timeRange, keyFilter, logPage]));
 
   // Load stats on range / key change；切换时间范围时日志回到第一页
   useEffect(() => {
     setLoading(true);
+    setBounds(getTimeBounds(timeRange));
     fetchStats(timeRange);
     setLogPage(1);
   }, [timeRange, keyFilter]);
@@ -402,9 +443,11 @@ export function StatsView() {
   // 数字翻动动画：与 Vue 版同策略，平滑过渡到新值
   const anim = useAnimatedStats(aggregated);
 
-  // Chart data：生成完整的时间序列，没有数据的桶填0
+  // Chart data：生成完整的时间序列，没有数据的桶填0。
+  // 边界与统计请求共用 bounds 快照——不能用 render 时现算的 now，
+  // 否则刷新回来的桶与图表生成的桶首尾错位，曲线会瞬间塌成零。
   const chartData = useMemo(() => {
-    const { from, to, granularity } = getTimeBounds(timeRange);
+    const { from, to, granularity } = bounds;
     const step = granularity === 'hour' ? 3600 : 86400;
     const prefix = granularity === 'hour' ? 'h' : 'd';
     // 后端 bucket = floor((utc_timestamp + tz_offset) / step)，前端也要加 tz_offset 才能匹配
@@ -438,7 +481,7 @@ export function StatsView() {
         cache: data.cache,
       };
     });
-  }, [rows, timeRange]);
+  }, [rows, bounds]);
 
   const logTotalPages = Math.max(1, Math.ceil(logTotal / LOG_PAGE_SIZE));
 
@@ -577,7 +620,8 @@ export function StatsView() {
                 className="text-muted-foreground"
                 // 与 Vue 版同策略：bucket 转为本地时间短标签；点数超过容量时每 N 个显示一个
                 tickFormatter={(v: string) => formatBucket(v)}
-                interval={Math.max(0, Math.ceil(chartData.length / 7) - 1)}
+                interval="preserveStartEnd"
+                minTickGap={32}
               />
               <YAxis
                 tick={{ fontSize: 11 }}

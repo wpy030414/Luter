@@ -19,7 +19,8 @@ impl super::Database {
         const SEVEN_DAYS: i64 = 7 * 86400;
         let window_start_5h = now - (now % FIVE_HOURS);
         let window_start_7d = now - (now % SEVEN_DAYS);
-        let conn = self.conn.lock().unwrap();
+        // 纯读：走读池，避免每次鉴权都与统计/写入争用同一把写锁。
+        let conn = self.reader();
         let mut stmt = conn.prepare(
             "SELECT
                 COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN prompt_tokens + completion_tokens + cache_read_input_tokens ELSE 0 END), 0),
@@ -114,7 +115,8 @@ impl super::Database {
         service_key_id: Option<&str>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         let prefix = if bucket_seconds == 3600 { "h" } else { "d" };
-        let conn = self.conn.lock().unwrap();
+        // 读池连接：与代理写入并行，不再抢写锁。WAL 下读快照一致。
+        let conn = self.reader();
         let sql = format!(
             "SELECT
                 COALESCE(u.service_key_id, '') AS skid,
@@ -180,7 +182,7 @@ impl super::Database {
         to_ts: i64,
         service_key_id: Option<&str>,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader();
         let sql = format!(
             "SELECT
                 u.model_id,
@@ -243,62 +245,71 @@ impl super::Database {
             where_sql.push_str(&format!(" AND u.timestamp <= {}", t));
         }
         where_sql.push_str(&key_filter_sql(service_key_id));
-        let conn = self.conn.lock().unwrap();
-        let total: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM usage_log u{}", where_sql),
-            [],
-            |row| row.get(0),
-        )?;
-        let offset = (page - 1).max(0) * page_size;
+        // 读池连接 + 只读事实：COUNT 与取页在同一快照事务里完成，
+        // 两者之间即使有并发插入也不会出现「总数 101、页数 7、末页空」的错位。
+        // 快照事务也压掉了 WAL 下两次查询各自定位 checkpoints 的开销。
+        let conn = self.reader();
+        conn.execute_batch("BEGIN DEFERRED")?;
+        let result = (|| -> anyhow::Result<(i64, Vec<serde_json::Value>)> {
+            let total: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM usage_log u{}", where_sql),
+                [],
+                |row| row.get(0),
+            )?;
+            let offset = (page - 1).max(0) * page_size;
 
-        let sql = format!(
-            "SELECT
-                id, timestamp,
-                provider_name, model_display_name,
-                service_key_name, service_key_masked,
-                key_name, key_masked,
-                request_type,
-                prompt_tokens, completion_tokens, latency_ms,
-                cache_read_input_tokens,
-                success, error_message,
-                first_token_ms
-             FROM usage_log u{}
-             ORDER BY timestamp DESC, id DESC
-             LIMIT ?1 OFFSET ?2",
-            where_sql,
-        );
-        let mut stmt = conn.prepare(&sql)?;
+            let sql = format!(
+                "SELECT
+                    id, timestamp,
+                    provider_name, model_display_name,
+                    service_key_name, service_key_masked,
+                    key_name, key_masked,
+                    request_type,
+                    prompt_tokens, completion_tokens, latency_ms,
+                    cache_read_input_tokens,
+                    success, error_message,
+                    first_token_ms
+                 FROM usage_log u{}
+                 ORDER BY timestamp DESC, id DESC
+                 LIMIT ?1 OFFSET ?2",
+                where_sql,
+            );
+            let mut stmt = conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(rusqlite::params![page_size, offset], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, i64>(0)?,
-                "timestamp": row.get::<_, i64>(1)?,
-                "provider_name": row.get::<_, String>(2)?,
-                "model_display_name": row.get::<_, String>(3)?,
-                "service_key_name": row.get::<_, String>(4)?,
-                "service_key_masked": row.get::<_, String>(5)?,
-                "key_name": row.get::<_, String>(6)?,
-                "key_masked": row.get::<_, String>(7)?,
-                "request_type": row.get::<_, String>(8)?,
-                "prompt_tokens": row.get::<_, i64>(9)?,
-                "completion_tokens": row.get::<_, i64>(10)?,
-                "latency_ms": row.get::<_, i64>(11)?,
-                // 缓存命中 tokens（prompt_tokens 为互斥的未命中口径）
-                "cache_read_input_tokens": row.get::<_, i64>(12)?,
-                "success": row.get::<_, i64>(13)? != 0,
-                "error_message": row.get::<_, Option<String>>(14)?,
-                // TTFT（首个内容增量耗时）；历史行与新列缺失时为 null。
-                // 输出速度（t/s）由前端按生成窗口口径派生：
-                // completion_tokens / ((latency_ms - first_token_ms)/1000)。
-                "first_token_ms": row.get::<_, Option<i64>>(15)?,
-            }))
-        })?;
+            let rows = stmt.query_map(rusqlite::params![page_size, offset], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "timestamp": row.get::<_, i64>(1)?,
+                    "provider_name": row.get::<_, String>(2)?,
+                    "model_display_name": row.get::<_, String>(3)?,
+                    "service_key_name": row.get::<_, String>(4)?,
+                    "service_key_masked": row.get::<_, String>(5)?,
+                    "key_name": row.get::<_, String>(6)?,
+                    "key_masked": row.get::<_, String>(7)?,
+                    "request_type": row.get::<_, String>(8)?,
+                    "prompt_tokens": row.get::<_, i64>(9)?,
+                    "completion_tokens": row.get::<_, i64>(10)?,
+                    "latency_ms": row.get::<_, i64>(11)?,
+                    // 缓存命中 tokens（prompt_tokens 为互斥的未命中口径）
+                    "cache_read_input_tokens": row.get::<_, i64>(12)?,
+                    "success": row.get::<_, i64>(13)? != 0,
+                    "error_message": row.get::<_, Option<String>>(14)?,
+                    // TTFT（首个内容增量耗时）；历史行与新列缺失时为 null。
+                    // 输出速度（t/s）由前端按生成窗口口径派生：
+                    // completion_tokens / ((latency_ms - first_token_ms)/1000)。
+                    "first_token_ms": row.get::<_, Option<i64>>(15)?,
+                }))
+            })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok((total, result))
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok((total, result))
+        })();
+        // 无论成功失败都结束快照，避免读连接残留在事务里。
+        let _ = conn.execute_batch("COMMIT");
+        result
     }
 }
 
@@ -386,6 +397,57 @@ mod tests {
         // 逆序：无 TTFT 的行在前
         assert_eq!(rows[0]["first_token_ms"], serde_json::Value::Null);
         assert_eq!(rows[1]["first_token_ms"], serde_json::json!(2000));
+    }
+
+    /// 读池正确性：路径型数据库会开读连接池，统计查询必须从池里看到写入连接
+    /// 刚提交的数据（WAL 下提交立即可见），且日志分页的快照事务不改变结果。
+    #[test]
+    fn test_reader_pool_sees_committed_writes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        // 每个测试进程用独立文件，避免并行测试互相污染。
+        let dir = std::env::temp_dir().join(format!(
+            "luter-reader-pool-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+
+        {
+            let db = super::super::Database::new(&path).unwrap();
+            db.migrate().unwrap();
+            for i in 0..5i64 {
+                db.insert_usage_log(
+                    1_000_000_000 + i,
+                    "p1", "P1", "m1", "M1",
+                    Some("pk1"), "PK", "pk-masked",
+                    Some("sk1"), "SK", "sk-masked",
+                    "/v1/messages",
+                    10, 20, 30, true, None, 0, None,
+                )
+                .unwrap();
+            }
+
+            // 统计聚合（读池）应看到全部 5 行。
+            let rows = db
+                .get_usage_by_day_and_key(1_000_000_000, 1_000_000_010, 3600, 0, None)
+                .unwrap();
+            let requests: i64 = rows.iter().map(|r| r["requests"].as_i64().unwrap()).sum();
+            assert_eq!(requests, 5, "reader pool must see committed writes");
+
+            // 日志分页（快照事务）总数与行数一致。
+            let (total, page) = db.get_usage_log_page(1, 10, None, None, None).unwrap();
+            assert_eq!((total, page.len()), (5, 5));
+
+            // 连续多次分页不应因快照事务残留而报错（事务必须被结束）。
+            for _ in 0..10 {
+                db.get_usage_log_page(1, 2, None, None, None).unwrap();
+            }
+        }
+
+        // 清理：WAL/SHM 文件一并删除（Windows 上连接关闭后才能删）。
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 5h / 7d 固定窗口聚合：只有当前窗口内的行被计入，跨窗口后用量归零。

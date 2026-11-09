@@ -403,4 +403,19 @@ DELETE FROM api_keys WHERE provider_id IN (SELECT provider_id FROM plugins WHERE
     r#"
 ALTER TABLE usage_log ADD COLUMN first_token_ms INTEGER;
 "#,
+    // V26: usage_log 复合索引 — 统计页在数据量大时抽风（数字归零、曲线消失）的根因之一。
+    //
+    // 统计三条查询（get_usage_by_day_and_key / get_usage_by_model / get_usage_log_page）
+    // 的 WHERE 都是 `timestamp BETWEEN ? AND ?` 可选 `AND service_key_id = ?`，
+    // 日志分页还要 `ORDER BY timestamp DESC, id DESC`。只有 timestamp 单列索引时，
+    // SQLite 选中它做范围扫，service_key_id 过滤退化为逐行回表；分页排序也拿不到
+    // 覆盖顺序，要额外排序临时表。
+    //
+    // 两条索引分别对应「全部密钥」与「指定密钥」两种查询形态：
+    // - (timestamp, id)              ：无筛选时范围 + 稳定倒序分页
+    // - (service_key_id, timestamp, id)：密钥筛选时先等值定位再范围扫，且排序免临时表
+    r#"
+CREATE INDEX IF NOT EXISTS idx_usage_ts_id ON usage_log(timestamp, id);
+CREATE INDEX IF NOT EXISTS idx_usage_sk_ts_id ON usage_log(service_key_id, timestamp, id);
+"#,
 ];

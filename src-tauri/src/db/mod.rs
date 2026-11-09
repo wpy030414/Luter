@@ -22,28 +22,74 @@ pub mod settings;
 pub mod usage;
 
 /// Database wrapper for SQLite operations with thread-safe access.
+///
+/// 写连接（`conn`）串行保护所有写入与需要事务的读；只读连接池（`readers`）
+/// 专门承载统计 / 日志这类可能全范围扫描的查询。WAL 模式下多读者互不阻塞，
+/// 统计查询因此不会再和代理的 `insert_usage_log` 抢同一把锁——这是统计页
+/// 在数据量大时卡顿、数字短暂归零的直接根因。
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    /// 只读连接池。路径型数据库每槽一条独立连接；内存库（测试）无法多连接
+    /// 共享数据，此时为空，读操作回退到 `conn`。
+    readers: Arc<Vec<Mutex<Connection>>>,
+    /// 读槽轮转指针。
+    reader_cursor: Arc<std::sync::atomic::AtomicUsize>,
+    path: Option<std::path::PathBuf>,
 }
+
+/// 只读连接池槽位数。统计页刷新一次并发 2 个查询，加上偶尔的审计/配额读，
+/// 4 条足够且不会给 WAL 带来不必要的台账开销。
+const READER_POOL_SIZE: usize = 4;
 
 impl Database {
     /// Open a new database connection with WAL mode enabled for better concurrency.
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path)?;
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
              PRAGMA busy_timeout = 5000;
              PRAGMA synchronous = NORMAL;"
         )?;
-        info!("SQLite WAL mode enabled");
+        // 读连接池：任一槽打开失败就整体降级为空池（读回退到写连接），
+        // 不影响启动——统计变慢好过应用起不来。
+        let mut readers = Vec::with_capacity(READER_POOL_SIZE);
+        for _ in 0..READER_POOL_SIZE {
+            match Connection::open(&path) {
+                Ok(c) => {
+                    // 只读连接也要 foreign_keys / busy_timeout；query_only 从
+                    // 引擎层面禁止写入，避免误用写路径时静默改数据。
+                    if let Err(e) = c.execute_batch(
+                        "PRAGMA foreign_keys = ON;
+                         PRAGMA busy_timeout = 5000;
+                         PRAGMA query_only = ON;",
+                    ) {
+                        info!("reader connection pragma failed: {e}");
+                        readers.clear();
+                        break;
+                    }
+                    readers.push(Mutex::new(c));
+                }
+                Err(e) => {
+                    info!("reader connection open failed, falling back to single connection: {e}");
+                    readers.clear();
+                    break;
+                }
+            }
+        }
+        info!("SQLite WAL mode enabled ({} reader connections)", readers.len());
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(readers),
+            reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            path: Some(path),
         })
     }
 
     /// Open an in-memory database (for tests).
+    /// 内存库每个连接是独立数据库，无法拆读池；读操作回退到唯一连接。
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -53,6 +99,9 @@ impl Database {
         )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Vec::new()),
+            reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            path: None,
         })
     }
 
@@ -120,6 +169,29 @@ impl Database {
     /// Get a lock on the database connection.
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap()
+    }
+
+    /// 取一条只读连接（轮转槽位），用于统计 / 日志这类扫描型查询。
+    /// 有读池时返回池内连接，与写连接互不阻塞；无读池（内存库）或槽位
+    /// 拿不到锁时回退到写连接——读永远能完成，只是可能稍慢。
+    pub fn reader(&self) -> std::sync::MutexGuard<'_, Connection> {
+        if self.readers.is_empty() {
+            return self.conn.lock().unwrap();
+        }
+        let n = self.readers.len();
+        let start = self
+            .reader_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % n;
+        for i in 0..n {
+            let idx = (start + i) % n;
+            if let Ok(guard) = self.readers[idx].try_lock() {
+                return guard;
+            }
+        }
+        // 所有读槽都在忙：退到任一个可阻塞的槽，而不是退回写连接，
+        // 避免统计把写入堵住。
+        self.readers[start].lock().unwrap()
     }
 
     /// Test database connectivity.
@@ -469,6 +541,9 @@ mod tests {
         .unwrap();
         let db = Database {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Vec::new()),
+            reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            path: None,
         };
 
         // 注入一条非法迁移，模拟历史上 V23 的解析失败。
