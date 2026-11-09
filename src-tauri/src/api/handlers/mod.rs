@@ -24,6 +24,9 @@ pub(crate) use plugin::{confirm_plugin, delete_plugin, get_plugin, get_plugin_ru
 pub(crate) use providers::{create_provider, delete_provider, get_provider, list_providers, reorder_providers, update_provider};
 pub(crate) use service_keys::{create_service_key, delete_service_key, list_service_keys, update_service_key};
 pub(crate) use stats::{get_settings, get_stats, get_stats_requests, get_ui_settings, update_settings};
+pub(crate) use stats::{
+    get_doubao_status, logout_doubao, start_doubao_login,
+};
 pub(crate) use websocket::ws_handler;
 pub(crate) use data::{export_data, import_data, reset_data};
 pub(crate) use fm::FmEngine;

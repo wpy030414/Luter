@@ -39,7 +39,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useTheme } from '@/hooks/useTheme';
 import { useI18nStore, type Locale } from '@/i18n';
 import { useT } from '@/i18n';
-import { settingsApi, type AppSettings, type SettingsUpdate } from '@/lib/api';
+import { settingsApi, doubaoSearchApi, type AppSettings, type SettingsUpdate, type DoubaoStatus } from '@/lib/api';
 import { tauriAutostart, tauriDialog, tauriFs, tauriShell, tauriApp, isTauri } from '@/lib/tauri';
 import { cn } from '@/lib/utils';
 
@@ -65,12 +65,14 @@ export function SettingsView() {
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [injectText, setInjectText] = useState('');
   const [injectSaved, setInjectSaved] = useState(false);
-  const [searchBackend, setSearchBackend] = useState('auto');
+  const [searchBackend, setSearchBackend] = useState('bing');
   const [searxngUrl, setSearxngUrl] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
   const [exaKey, setExaKey] = useState('');
   const [braveKey, setBraveKey] = useState('');
   const [searchSaved, setSearchSaved] = useState(false);
+  const [doubaoStatus, setDoubaoStatus] = useState<DoubaoStatus | null>(null);
+  const [doubaoBusy, setDoubaoBusy] = useState(false);
 
   // Load settings and Tauri state
   useEffect(() => {
@@ -95,9 +97,74 @@ export function SettingsView() {
 
   // Sync search config from settings store
   useEffect(() => {
-    setSearchBackend(settings?.search_backend || 'auto');
+    setSearchBackend(settings?.search_backend || 'bing');
     setSearxngUrl(settings?.search_searxng_url || '');
   }, [settings?.search_backend, settings?.search_searxng_url]);
+
+  // 豆包登录状态：首次加载 + 每 2s 轮询（登录窗进行中时）
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const status = await doubaoSearchApi.status();
+        if (!cancelled) setDoubaoStatus(status);
+        return status;
+      } catch {
+        return null;
+      }
+    };
+    refresh();
+    const timer = window.setInterval(async () => {
+      const status = await refresh();
+      // 登录流程结束（成功/失败）后停止高频轮询
+      if (status && status.login_status !== 'pending') {
+        window.clearInterval(timer);
+      }
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const handleDoubaoLogin = async () => {
+    setDoubaoBusy(true);
+    try {
+      setDoubaoStatus((prev) =>
+        prev ? { ...prev, login_status: 'pending', login_message: t('settings.search.doubao.pending') } : prev,
+      );
+      await doubaoSearchApi.login();
+      // 登录成功后自动启用豆包参与 auto 融合（仅 auto 模式时）
+      const status = await doubaoSearchApi.status();
+      setDoubaoStatus(status);
+      // 登录成功后自动启用豆包参与（单一后端模式下无需额外开关）
+      if (!settings?.search_doubao_enabled) {
+        await updateSettings({ search_doubao_enabled: true });
+      }
+      await fetchSettings();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setDoubaoStatus((prev) => (prev ? { ...prev, login_status: 'failed', login_message: message } : prev));
+    } finally {
+      setDoubaoBusy(false);
+    }
+  };
+
+  const handleDoubaoLogout = async () => {
+    setDoubaoBusy(true);
+    try {
+      await doubaoSearchApi.logout();
+      // 登出后豆包不再参与融合（避免未登录时每轮搜索记一条失败）
+      if (settings?.search_doubao_enabled) {
+        await updateSettings({ search_doubao_enabled: false });
+      }
+      const status = await doubaoSearchApi.status();
+      setDoubaoStatus(status);
+      await fetchSettings();
+    } finally {
+      setDoubaoBusy(false);
+    }
+  };
 
   // Toggle handlers
   const handleSettingToggle = async (key: keyof AppSettings, value: boolean) => {
@@ -501,7 +568,7 @@ export function SettingsView() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {['auto', 'bing', 'searxng', 'tavily', 'exa', 'brave'].map((key) => (
+                      {['bing', 'doubao', 'searxng', 'tavily', 'exa', 'brave'].map((key) => (
                         <SelectItem key={key} value={key}>
                           {t(`settings.search.backend.${key}`)}
                         </SelectItem>
@@ -510,7 +577,7 @@ export function SettingsView() {
                   </Select>
                 </div>
 
-                {(searchBackend === 'auto' || searchBackend === 'searxng') && (
+                {searchBackend === 'searxng' && (
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
                       <Label className="w-28 shrink-0 text-sm">{t('settings.search.searxng')}</Label>
@@ -527,7 +594,7 @@ export function SettingsView() {
                   </div>
                 )}
 
-                {(searchBackend === 'auto' || searchBackend === 'tavily') && (
+                {searchBackend === 'tavily' && (
                   <div className="flex items-center gap-2">
                     <Label className="w-28 shrink-0 text-sm">Tavily</Label>
                     <Input
@@ -549,7 +616,7 @@ export function SettingsView() {
                   </div>
                 )}
 
-                {(searchBackend === 'auto' || searchBackend === 'exa') && (
+                {searchBackend === 'exa' && (
                   <div className="flex items-center gap-2">
                     <Label className="w-28 shrink-0 text-sm">Exa</Label>
                     <Input
@@ -571,7 +638,7 @@ export function SettingsView() {
                   </div>
                 )}
 
-                {(searchBackend === 'auto' || searchBackend === 'brave') && (
+                {searchBackend === 'brave' && (
                   <div className="flex items-center gap-2">
                     <Label className="w-28 shrink-0 text-sm">Brave</Label>
                     <Input
@@ -588,6 +655,38 @@ export function SettingsView() {
                     {settings.search_brave_key_set && (
                       <Button size="sm" variant="ghost" onClick={() => saveSearchConfig('brave')}>
                         {t('settings.search.clear')}
+                      </Button>
+                    )}
+                  </div>
+                )}
+
+                {searchBackend === 'doubao' && (
+                  <div className="flex items-center gap-2">
+                    <Label className="w-28 shrink-0 text-sm">Doubao</Label>
+                    {doubaoStatus?.logged_in ? (
+                      <>
+                        <span className="flex-1 text-xs text-muted-foreground">
+                          {doubaoStatus.nickname || t('settings.search.doubao.loggedIn')}
+                        </span>
+                        <Button size="sm" variant="ghost" onClick={handleDoubaoLogout} disabled={doubaoBusy}>
+                          {t('settings.search.doubao.logout')}
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleDoubaoLogin}
+                        disabled={doubaoBusy || doubaoStatus?.login_status === 'pending'}
+                      >
+                        {doubaoBusy || doubaoStatus?.login_status === 'pending' ? (
+                          <>
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                            {t('settings.search.doubao.loggingIn')}
+                          </>
+                        ) : (
+                          t('settings.search.doubao.login')
+                        )}
                       </Button>
                     )}
                   </div>

@@ -12,11 +12,15 @@
 //! 避免模型在同一会话里反复打同一查询。
 
 pub mod bing;
-mod config;
+pub mod config;
+pub mod doubao;
 mod engines;
 
 pub use bing::SearchHttp;
-pub use config::{persist_backend, persist_key, persist_searxng_url, SearchConfig, BACKENDS};
+pub use config::{
+    persist_backend, persist_doubao_enabled, persist_key, persist_searxng_url, SearchConfig,
+    BACKENDS,
+};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -203,6 +207,8 @@ pub enum Engine {
     Tavily,
     Exa,
     Brave,
+    /// 豆包联网搜索（网页端逆向；需先登录）
+    Doubao,
 }
 
 impl Engine {
@@ -213,6 +219,7 @@ impl Engine {
             Self::Tavily => "tavily",
             Self::Exa => "exa",
             Self::Brave => "brave",
+            Self::Doubao => "doubao",
         }
     }
 
@@ -223,6 +230,7 @@ impl Engine {
             "tavily" => Some(Self::Tavily),
             "exa" => Some(Self::Exa),
             "brave" => Some(Self::Brave),
+            "doubao" => Some(Self::Doubao),
             _ => None,
         }
     }
@@ -233,6 +241,8 @@ pub struct SearchCtx<'a> {
     pub config: &'a SearchConfig,
     pub bing: &'a SearchHttp,
     pub client: &'a reqwest::Client,
+    /// 豆包登录凭证（未登录为 `None`）；由调用方从 `AppState` 读取后传入
+    pub doubao_credential: Option<&'a doubao::auth::Credential>,
 }
 
 /// 搜索结果（`engines` 为实际参与融合的后端名）。
@@ -253,9 +263,20 @@ pub async fn search(ctx: &SearchCtx<'_>, params: &SearchParams) -> anyhow::Resul
         return Ok(hit);
     }
 
-    let engines = ctx.config.plan();
+    let mut engines: Vec<Engine> = ctx
+        .config
+        .plan()
+        .into_iter()
+        // 豆包需登录：无凭证时不参与（显式指定 doubao 时保留，以给出「未登录」错误）
+        .filter(|e| {
+            *e != Engine::Doubao
+                || ctx.doubao_credential.is_some()
+                || ctx.config.backend == "doubao"
+        })
+        .collect();
+    // 过滤后为空（例如只开了豆包但未登录）→ 回退 Bing，保证搜索不空转
     if engines.is_empty() {
-        bail!("未配置任何搜索来源");
+        engines.push(Engine::Bing);
     }
 
     let mut groups: Vec<Vec<SearchResult>> = Vec::new();
@@ -354,6 +375,23 @@ async fn run_engine(
         Engine::Tavily => engines::tavily(ctx.client, ctx.config, params).await,
         Engine::Exa => engines::exa(ctx.client, ctx.config, params).await,
         Engine::Brave => engines::brave(ctx.client, ctx.config, params).await,
+        Engine::Doubao => {
+            let credential = ctx
+                .doubao_credential
+                .ok_or_else(|| anyhow::anyhow!("豆包未登录：请在设置页完成登录"))?;
+            let doubao_ctx = doubao::DoubaoSearchCtx {
+                client: ctx.client,
+                base_url: &ctx.config.doubao_base_url,
+                aid: &ctx.config.doubao_aid,
+                pc_version: &ctx.config.doubao_pc_version,
+                bot_id: &ctx.config.doubao_bot_id,
+                model: &ctx.config.doubao_model,
+                credential,
+            };
+            // 豆包无原生域名参数，用 site: 操作符表达
+            let query = build_engine_query(params);
+            doubao::search(&doubao_ctx, &query).await
+        }
     }
 }
 
@@ -483,6 +521,10 @@ pub fn configured_engines(config: &SearchConfig) -> Vec<&'static str> {
 
 impl SearchConfig {
     /// 按配置生成执行计划。
+    ///
+    /// `auto`：已配置的后端并发融合。豆包仅在**显式开启**（`search_doubao_enabled=1`）
+    /// 且**有登录凭证**时参与——未登录时不进计划，避免每次搜索都记一条失败、也避免
+    /// 挤掉 Bing 兜底（凭证判据由调用方在 `SearchCtx.doubao_credential` 提供）。
     pub(crate) fn plan(&self) -> Vec<Engine> {
         if let Some(engine) = Engine::from_name(&self.backend) {
             return vec![engine];
@@ -499,6 +541,9 @@ impl SearchConfig {
         }
         if self.brave_key.is_some() {
             plan.push(Engine::Brave);
+        }
+        if self.doubao_enabled {
+            plan.push(Engine::Doubao);
         }
         if plan.is_empty() {
             plan.push(Engine::Bing);

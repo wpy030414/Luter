@@ -118,6 +118,11 @@ pub(crate) async fn get_settings(State(state): State<Arc<AppState>>) -> impl Int
         .map(|c| c.clone())
         .unwrap_or_default();
     let search_engines = search.effective();
+    let doubao_logged_in = state
+        .doubao_credential
+        .read()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false);
 
     Json(serde_json::json!({
         "mcp_websearch": state.mcp_websearch.load(std::sync::atomic::Ordering::Relaxed),
@@ -137,6 +142,8 @@ pub(crate) async fn get_settings(State(state): State<Arc<AppState>>) -> impl Int
         "search_exa_key_set": search.exa_key.is_some(),
         "search_brave_key_set": search.brave_key.is_some(),
         "search_engines": search_engines,
+        "search_doubao_enabled": search.doubao_enabled,
+        "search_doubao_logged_in": doubao_logged_in,
     }))
 }
 
@@ -156,6 +163,8 @@ pub(crate) struct UpdateSettingsRequest {
     tavily_api_key: Option<String>,
     exa_api_key: Option<String>,
     brave_api_key: Option<String>,
+    /// 豆包是否参与 `auto` 融合
+    search_doubao_enabled: Option<bool>,
 }
 
 pub(crate) async fn update_settings(
@@ -321,6 +330,110 @@ pub(crate) async fn update_settings(
                 )
             },
         )?;
+    }
+    if let Some(enabled) = req.search_doubao_enabled {
+        let mut cfg = state.search_config.write().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "search config lock poisoned"})),
+            )
+        })?;
+        cfg.set_doubao_enabled(enabled);
+        crate::search::config::persist_doubao_enabled(&state.database, enabled).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+    }
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+// ── 豆包登录（搜索源） ─────────────────────────────────────────────
+
+/// GET /api/search/doubao/status — 登录状态 + 是否参与融合。
+pub(crate) async fn get_doubao_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let credential = state
+        .doubao_credential
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let (login_status, login_message) = state.doubao_login.status_text();
+    let enabled = state
+        .search_config
+        .read()
+        .map(|c| c.doubao_enabled)
+        .unwrap_or(true);
+    Json(serde_json::json!({
+        "logged_in": credential.is_some(),
+        "enabled": enabled,
+        "nickname": credential.as_ref().and_then(|c| c.nickname.clone()),
+        "uid": credential.as_ref().and_then(|c| c.uid.clone()),
+        "saved_at": credential.as_ref().map(|c| c.saved_at),
+        "login_status": login_status,
+        "login_message": login_message,
+    }))
+}
+
+/// POST /api/search/doubao/login — 打开登录窗并等待授权（阻塞至完成/超时）。
+pub(crate) async fn start_doubao_login(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(app) = crate::app_handle() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Tauri 应用未就绪，无法打开登录窗"})),
+        ));
+    };
+    let outcome = crate::search::doubao::login::login(app, state.doubao_login.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+
+    // 加密落盘 + 热更新内存
+    let path = crate::search::doubao::auth::default_path(&state.data_dir);
+    crate::search::doubao::auth::save(
+        &path,
+        &state.master_key,
+        &outcome.cookie_header,
+        outcome.uid.clone(),
+        outcome.nickname.clone(),
+        &outcome.device,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    let credential = crate::search::doubao::auth::load(&path, &state.master_key);
+    if let Ok(mut guard) = state.doubao_credential.write() {
+        *guard = credential;
+    }
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "nickname": outcome.nickname,
+        "uid": outcome.uid,
+    })))
+}
+
+/// POST /api/search/doubao/logout — 删除本地凭证。
+pub(crate) async fn logout_doubao(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let path = crate::search::doubao::auth::default_path(&state.data_dir);
+    crate::search::doubao::auth::clear(&path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    if let Ok(mut guard) = state.doubao_credential.write() {
+        *guard = None;
     }
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

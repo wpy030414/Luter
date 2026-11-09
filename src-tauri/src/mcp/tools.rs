@@ -343,10 +343,17 @@ async fn run_web_search(args: &JsonObject) -> CallToolResponse {
         .read()
         .map(|c| c.clone())
         .unwrap_or_default();
+    // 豆包凭证同样先克隆（Option<Credential>，已加密解出的明文仅驻留内存）
+    let doubao_credential = state
+        .doubao_credential
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
     let ctx = crate::search::SearchCtx {
         config: &config,
         bing: &state.search_http,
         client: &state.http_client,
+        doubao_credential: doubao_credential.as_ref(),
     };
 
     info!(

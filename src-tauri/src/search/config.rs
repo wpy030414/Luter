@@ -1,12 +1,15 @@
 //! 搜索后端配置：settings 表读写 + API Key 加密。
 //!
 //! 键位：
-//! - `search_backend`：`auto` | `bing` | `searxng` | `tavily` | `exa` | `brave`
+//! - `search_backend`：`auto` | `bing` | `searxng` | `tavily` | `exa` | `brave` | `doubao`
 //! - `search_searxng_url`：SearXNG 实例根地址（明文）
 //! - `search_tavily_key` / `search_exa_key` / `search_brave_key`：AES-256-GCM 密文
+//! - `search_doubao_enabled`：`1`/`0`，是否让豆包参与 `auto` 融合（需已登录）
 //!
 //! 密钥与 Provider API Key 同源（`crypto::MasterKey`），但独立键位——搜索服务
 //! 不属于 Provider 注册表，不参与密钥轮换与用量统计。
+//!
+//! 豆包凭证不走 settings 表，独立加密文件（见 `doubao::auth`）。
 
 use anyhow::Context;
 
@@ -16,12 +19,18 @@ use crate::db::Database;
 use super::Engine;
 
 /// 可选的后端名（`auto` = 已配置后端并发融合）。
-pub const BACKENDS: &[&str] = &["auto", "bing", "searxng", "tavily", "exa", "brave"];
+pub const BACKENDS: &[&str] = &[
+    "auto", "bing", "searxng", "tavily", "exa", "brave", "doubao",
+];
+
+/// 豆包网页端对话路径（`search::doubao` 引用）。
+pub const DOUBAO_CHAT_PATH: &str = "/chat/completion";
 
 const KEY_TAVILY: &str = "search_tavily_key";
 const KEY_EXA: &str = "search_exa_key";
 const KEY_BRAVE: &str = "search_brave_key";
 const KEY_SEARXNG_URL: &str = "search_searxng_url";
+const KEY_DOUBAO_ENABLED: &str = "search_doubao_enabled";
 
 /// 运行时搜索配置（AppState 持有，设置变更后热更新）。
 #[derive(Debug, Clone, Default)]
@@ -31,6 +40,18 @@ pub struct SearchConfig {
     pub tavily_key: Option<String>,
     pub exa_key: Option<String>,
     pub brave_key: Option<String>,
+    /// 豆包是否参与 `auto` 融合（默认 true，但需实际登录才生效）
+    pub doubao_enabled: bool,
+    /// 豆包网关根地址
+    pub doubao_base_url: String,
+    /// 豆包网页端 aid
+    pub doubao_aid: String,
+    /// 豆包网页端版本参数
+    pub doubao_pc_version: String,
+    /// 豆包 bot id
+    pub doubao_bot_id: String,
+    /// 搜索使用的模型别名（`doubao-expert` / `doubao-fast`）
+    pub doubao_model: String,
 }
 
 impl SearchConfig {
@@ -39,7 +60,12 @@ impl SearchConfig {
         let get = |key: &str| db.get_setting(key).ok().flatten();
         let backend = get("search_backend")
             .filter(|v| BACKENDS.contains(&v.as_str()))
-            .unwrap_or_else(|| "auto".to_string());
+            .unwrap_or_else(|| "bing".to_string());
+        // 豆包默认不参与：需登录，未登录时不应挤掉 Bing 兜底。
+        // （`auto` 后端已从 UI 移除，但仍作为历史值兼容融合执行。）
+        let doubao_enabled = get(KEY_DOUBAO_ENABLED)
+            .map(|v| v.trim() == "1" || v.trim() == "true")
+            .unwrap_or(false);
         Self {
             backend,
             searxng_url: get(KEY_SEARXNG_URL)
@@ -48,6 +74,27 @@ impl SearchConfig {
             tavily_key: decrypt_setting(db, KEY_TAVILY, master),
             exa_key: decrypt_setting(db, KEY_EXA, master),
             brave_key: decrypt_setting(db, KEY_BRAVE, master),
+            doubao_enabled,
+            doubao_base_url: get("search_doubao_base_url")
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "https://www.doubao.com".to_string()),
+            doubao_aid: get("search_doubao_aid")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "497858".to_string()),
+            doubao_pc_version: get("search_doubao_pc_version")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "3.44.8".to_string()),
+            doubao_bot_id: get("search_doubao_bot_id")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "7338286299411103781".to_string()),
+            doubao_model: get("search_doubao_model")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "doubao-expert".to_string()),
         }
     }
 
@@ -71,6 +118,11 @@ impl SearchConfig {
         };
     }
 
+    /// 设置豆包是否参与自动融合。
+    pub fn set_doubao_enabled(&mut self, enabled: bool) {
+        self.doubao_enabled = enabled;
+    }
+
     /// 设置某后端的 API Key（空串 = 清除）。
     pub fn set_key(&mut self, engine: Engine, value: &str) -> anyhow::Result<()> {
         let trimmed = value.trim();
@@ -78,7 +130,7 @@ impl SearchConfig {
             Engine::Tavily => &mut self.tavily_key,
             Engine::Exa => &mut self.exa_key,
             Engine::Brave => &mut self.brave_key,
-            Engine::Searxng | Engine::Bing => {
+            Engine::Searxng | Engine::Bing | Engine::Doubao => {
                 anyhow::bail!("{} 不需要 API Key", engine.name())
             }
         };
@@ -90,7 +142,8 @@ impl SearchConfig {
         Ok(())
     }
 
-    /// 是否已配置该后端。
+    /// 是否已配置该后端。豆包的「已配置」由登录凭证单独判断
+    /// （见 `SearchCtx::doubao_credential`），这里返回开关值。
     pub fn has(&self, engine: Engine) -> bool {
         match engine {
             Engine::Bing => true,
@@ -98,6 +151,7 @@ impl SearchConfig {
             Engine::Tavily => self.tavily_key.is_some(),
             Engine::Exa => self.exa_key.is_some(),
             Engine::Brave => self.brave_key.is_some(),
+            Engine::Doubao => self.doubao_enabled,
         }
     }
 
@@ -134,6 +188,12 @@ pub fn persist_searxng_url(db: &Database, value: &str) -> anyhow::Result<()> {
         .context("写入 search_searxng_url 失败")
 }
 
+/// 持久化：豆包是否参与自动融合（`"1"` / `"0"`）。
+pub fn persist_doubao_enabled(db: &Database, enabled: bool) -> anyhow::Result<()> {
+    db.set_setting(KEY_DOUBAO_ENABLED, if enabled { "1" } else { "0" })
+        .context("写入 search_doubao_enabled 失败")
+}
+
 /// 持久化：后端 API Key（空串清除，否则加密存储）。
 pub fn persist_key(
     db: &Database,
@@ -145,7 +205,9 @@ pub fn persist_key(
         Engine::Tavily => KEY_TAVILY,
         Engine::Exa => KEY_EXA,
         Engine::Brave => KEY_BRAVE,
-        Engine::Searxng | Engine::Bing => anyhow::bail!("{} 不需要 API Key", engine.name()),
+        Engine::Searxng | Engine::Bing | Engine::Doubao => {
+            anyhow::bail!("{} 不需要 API Key", engine.name())
+        }
     };
     let value = if plain.trim().is_empty() {
         String::new()
@@ -173,7 +235,7 @@ mod tests {
         let master = master_key(&tmp);
 
         let cfg = SearchConfig::load(&db, &master);
-        assert_eq!(cfg.backend, "auto");
+        assert_eq!(cfg.backend, "bing");
         assert!(cfg.tavily_key.is_none());
         assert_eq!(cfg.effective(), vec!["bing"]);
 

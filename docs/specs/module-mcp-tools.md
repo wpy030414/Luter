@@ -25,12 +25,27 @@
   - `include_domains` / `exclude_domains`（optional，string[]）
   - `ori_question`（optional，多轮对话原始意图，参与重排与摘录选取）
 - **引擎选择（`crate::search`）**：
-  - 后端：`auto`（默认）| `bing` | `searxng` | `tavily` | `exa` | `brave`；密钥与实例地址存
+  - 后端：`auto`（默认）| `bing` | `searxng` | `tavily` | `exa` | `brave` | `doubao`；密钥与实例地址存
     `settings` 表（API Key 走 AES-256-GCM，见 `search/config.rs`）。
-  - `auto`：把**已配置**的 SearXNG / Tavily / Exa / Brave **并发**执行（单引擎 15s、
+  - `auto`：把**已配置**的 SearXNG / Tavily / Exa / Brave / 豆包 **并发**执行（单引擎 15s、
     整体 20s 预算），按 RRF（k=60）融合名次，再做 URL 归一化去重（去 fragment /
     跟踪参数 / 尾斜杠）；全部失败时回退 Bing。未配置任何来源 → 仅 Bing。
   - 显式指定后端时不做融合，直接返回该引擎排序。
+  - **豆包联网搜索**（`search/doubao/`，内置 Rust 实现，非插件）：
+    - 走豆包网页端 `/chat/completion` SSE 逆向；**是否联网由模型意图决定**
+      （`llm_intention=browsing`），无请求参数可强制，本引擎用 prompt 引导；
+      未触发时返回空列表而非报错。
+    - 只取 `block_type=10025` 的 `search_query_result_block`：标题 + URL（无正文），
+      `snippet` 留空，正文由 `content/` 层按 `url` 抓取补全。
+    - **默认不参与 auto**：`search_doubao_enabled=1` 且**已登录**才进计划，
+      否则忽略（避免未登录时每次搜索记一条失败、挤掉 Bing 兜底）。
+    - 登录：Tauri WebView 打开豆包官方页 → 抖音 OAuth，`WebviewWindow::cookies_for_url`
+      读取含 HttpOnly 的 `sessionid`；凭证 AES-256-GCM 加密落盘
+      （`data_dir/doubao-credential.json`），不落明文、不进日志。
+    - 管理端点：`GET /api/search/doubao/status`、`POST /api/search/doubao/login`、
+      `POST /api/search/doubao/logout`（均受 loopback 限制）。
+    - 凭证失效（`710012001`）→ 提示重新登录；风控（`710022004`）→ 记日志并返回错误；
+      豆包**只做一次尝试**，不轮换、不重试。
   - **查询缓存**：`(backend, query, num_results, freshness, domains)` 为键，TTL 15min、
     容量 64，避免同一会话反复打同一查询。
   - **域名过滤**：Tavily 用原生参数，其余引擎用 `site:` / `-site:` 操作符表达；
@@ -182,6 +197,9 @@ server-side 工具归一化（`from_messages.rs` / `from_responses.rs`：`web_se
 - `src-tauri/src/search/` — 搜索层：`mod.rs`（引擎计划 / 并发 / RRF / 缓存）、
   `bing.rs`（零配置默认后端）、`engines.rs`（SearXNG / Tavily / Exa / Brave）、
   `config.rs`（settings 读写 + API Key 加密）。
+  - `doubao/` — 豆包联网搜索（内置）：`mod.rs`（SSE 流式解析 + 10025 提取）、
+    `protocol.rs`（请求体构造 / SSE 帧解析，纯函数）、`auth.rs`（凭证 AES 加密落盘）、
+    `login.rs`（Tauri WebView 登录窗 + cookie 读取）。
 - `src-tauri/src/api/proxy/stream.rs` — `strip_search_tools` + 入口调用。
 - `src-tauri/src/api/router.rs` — `/mcp` 路由注册。
 - `src/views/SettingsView.tsx` — 三个开关 + MCP 接入信息卡（端点 + 注册命令 + 复制）。

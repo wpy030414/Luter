@@ -290,7 +290,7 @@ export interface AppSettings {
   theme: string;
   hue: number;
   locale: string;
-  /** 搜索后端：auto | bing | searxng | tavily | exa | brave */
+  /** 搜索后端：auto | bing | searxng | tavily | exa | brave | doubao */
   search_backend: string;
   search_searxng_url: string;
   search_tavily_key_set: boolean;
@@ -298,6 +298,10 @@ export interface AppSettings {
   search_brave_key_set: boolean;
   /** auto 模式下实际参与融合的来源 */
   search_engines: string[];
+  /** 豆包是否参与 auto 融合 */
+  search_doubao_enabled: boolean;
+  /** 豆包是否已登录（凭证可解密且含 sessionid） */
+  search_doubao_logged_in: boolean;
 }
 
 /** 可写设置项（密钥字段只写不读，空串表示清除）。 */
@@ -311,6 +315,29 @@ export const settingsApi = {
   get: () => request<AppSettings>('/api/settings'),
   update: (data: SettingsUpdate) =>
     request<{ status: string }>('/api/settings', { method: 'PUT', body: data }),
+};
+
+// --- 豆包搜索登录（WebView 扫码登录） ---
+export interface DoubaoStatus {
+  logged_in: boolean;
+  enabled: boolean;
+  nickname: string | null;
+  uid: string | null;
+  saved_at: number | null;
+  /** idle | pending | success | failed */
+  login_status: string;
+  login_message: string;
+}
+
+export const doubaoSearchApi = {
+  status: () => request<DoubaoStatus>('/api/search/doubao/status'),
+  login: () =>
+    request<{ status: string; nickname: string | null; uid: string | null }>(
+      '/api/search/doubao/login',
+      { method: 'POST' },
+    ),
+  logout: () =>
+    request<{ status: string }>('/api/search/doubao/logout', { method: 'POST' }),
 };
 
 // --- UI Settings (public, for LAN install page) ---

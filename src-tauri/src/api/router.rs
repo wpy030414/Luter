@@ -176,6 +176,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/service-keys/:id", put(handlers::update_service_key).delete(handlers::delete_service_key))
         // App settings
         .route("/api/settings", get(handlers::get_settings).put(handlers::update_settings))
+        // 豆包搜索：登录状态 / 打开登录窗 / 登出
+        .route("/api/search/doubao/status", get(handlers::get_doubao_status))
+        .route("/api/search/doubao/login", post(handlers::start_doubao_login))
+        .route("/api/search/doubao/logout", post(handlers::logout_doubao))
         // Data management (export/import/reset)
         .route("/api/data/export", get(handlers::export_data))
         .route("/api/data/import", post(handlers::import_data))

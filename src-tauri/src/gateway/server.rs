@@ -56,6 +56,12 @@ pub struct AppState {
     pub search_http: crate::search::bing::SearchHttp,
     /// 搜索后端配置（设置页热更新；密钥解密后驻留内存）。
     pub search_config: Arc<std::sync::RwLock<crate::search::SearchConfig>>,
+    /// 豆包登录凭证缓存（未登录为 `None`；登录成功后热更新）。
+    pub doubao_credential: Arc<std::sync::RwLock<Option<crate::search::doubao::auth::Credential>>>,
+    /// 豆包登录流程状态（供设置页轮询）。
+    pub doubao_login: Arc<crate::search::doubao::login::LoginState>,
+    /// 数据目录（豆包凭证文件路径推导用）。
+    pub data_dir: std::path::PathBuf,
     /// 本地模型管理（私有化）：GGUF 导入/引擎生命周期/provider 注册。契约见 module-local-models.md。
     pub local: LocalManager,
 }
@@ -135,6 +141,13 @@ impl AppState {
             &database,
             &master_key,
         )));
+        // 豆包凭证：从加密文件加载；失败视为未登录（不阻塞启动）。
+        let doubao_credential = Arc::new(std::sync::RwLock::new(
+            crate::search::doubao::auth::load(
+                &crate::search::doubao::auth::default_path(data_dir),
+                &master_key,
+            ),
+        ));
 
         let plugins = PluginManager::new(database.clone(), providers.providers_map());
         let plugin_host =
@@ -184,6 +197,9 @@ impl AppState {
             fm,
             search_http: Default::default(),
             search_config,
+            doubao_credential,
+            doubao_login: Arc::new(crate::search::doubao::login::LoginState::default()),
+            data_dir: data_dir.to_path_buf(),
             local,
         }
     }

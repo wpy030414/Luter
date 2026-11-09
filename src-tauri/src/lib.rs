@@ -38,6 +38,14 @@ mod splash;
 // 品牌图形：菜单栏模板图标与 macOS 图标素材（见 src/bin/icon.rs）
 pub mod brand;
 
+/// 全局 AppHandle（setup 时写入；供 API handler 建登录窗等主线程操作）。
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// 取全局 AppHandle；setup 之前返回 `None`。
+pub fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.get().cloned()
+}
+
 // SDK 合规验证（fixtures 导出 + Python 官方 SDK 校验脚本）。
 // 本目录仅 test 构建；正式构建不编译任何测试代码。
 #[cfg(test)]
@@ -365,6 +373,9 @@ pub fn run() {
             // Create shared application state with all registries
             let app_state = Arc::new(AppState::new(config.clone(), database.clone(), master_key, &data_dir));
             app.manage(app_state.clone());
+
+            // 全局 AppHandle：供管理 API 打开豆包登录窗等需要 Tauri 上下文的操作。
+            let _ = APP_HANDLE.set(app.handle().clone());
 
             // ── 桌面壁纸劫持（FM 像素艺术 → 桌面层）──
             // 状态管理 + 启动恢复：上次勾选过则重建壁纸窗口。

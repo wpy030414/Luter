@@ -228,4 +228,5 @@ docs/
 | 修改审计/对话记录 | `api/proxy/audit.rs` + `api/handlers/audit.rs` + `db/conversations.rs` + `src/views/AuditView.tsx` |
 | 修改 MCP 工具 | `mcp/{mod,tools,fetch,notify}.rs` + `net_guard.rs` + `docs/specs/module-mcp-tools.md` |
 | 修改搜索/内容增强 | `search/` + `content/` + `docs/specs/module-mcp-tools.md` |
+| 修改豆包搜索 | `search/doubao/{mod,protocol,auth,login}.rs` + `search/config.rs` + `api/handlers/stats.rs`（登录端点）+ `src/views/SettingsView.tsx` |
 | 修改冷启动 splash | `splash/{mod,render,win,macos}.rs` + `App.tsx`（`app-ready` 事件） |
