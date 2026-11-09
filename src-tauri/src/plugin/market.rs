@@ -149,16 +149,18 @@ pub async fn install(data_dir: &Path, repo: &str) -> anyhow::Result<InstallOutco
     let dest = root.join(repo);
     let dest_str = dest.to_string_lossy().to_string();
     let url = format!("https://github.com/{REPO_OWNER}/{repo}.git");
+    // git/pnpm 不读网关 reqwest 的代理配置，环境变量需显式注入，否则 GitHub 直连超时
+    let proxy = proxy_envs();
 
     if dest.join(".git").is_dir() {
         // 已装过：拉最新代码（浅克隆，FETCH_HEAD 即远端默认分支头）
-        run("git", &["-C", &dest_str, "fetch", "--depth", "1", "origin"], None, CLONE_TIMEOUT).await?;
-        run("git", &["-C", &dest_str, "reset", "--hard", "FETCH_HEAD"], None, CLONE_TIMEOUT).await?;
+        run("git", &["-C", &dest_str, "fetch", "--depth", "1", "origin"], None, &proxy, CLONE_TIMEOUT).await?;
+        run("git", &["-C", &dest_str, "reset", "--hard", "FETCH_HEAD"], None, &proxy, CLONE_TIMEOUT).await?;
     } else {
         if dest.exists() {
             tokio::fs::remove_dir_all(&dest).await.context("清理残留目录失败")?;
         }
-        run("git", &["clone", "--depth", "1", &url, &dest_str], None, CLONE_TIMEOUT).await?;
+        run("git", &["clone", "--depth", "1", &url, &dest_str], None, &proxy, CLONE_TIMEOUT).await?;
     }
 
     if !dest.join("package.json").is_file() {
@@ -170,6 +172,7 @@ pub async fn install(data_dir: &Path, repo: &str) -> anyhow::Result<InstallOutco
         pnpm,
         &["install", "--prefer-offline", "--reporter=append-only"],
         Some(&dest),
+        &proxy,
         INSTALL_TIMEOUT,
     )
     .await
@@ -179,6 +182,21 @@ pub async fn install(data_dir: &Path, repo: &str) -> anyhow::Result<InstallOutco
         repo: repo.to_string(),
         work_dir: dest_str,
     })
+}
+
+/// 系统代理的环境变量形式（`https_proxy` 等），供 git / pnpm / 登录脚本继承。
+///
+/// 统一取 `http::system_proxy()`：网关内所有出站请求同源，用户只在一处配代理。
+/// 已存在的环境变量不覆盖（`resolve_system_proxy` 本就优先读环境变量）。
+fn proxy_envs() -> Vec<(String, String)> {
+    let Some(proxy) = crate::http::system_proxy() else {
+        return Vec::new();
+    };
+    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        .into_iter()
+        .filter(|k| std::env::var_os(k).is_none())
+        .map(|k| (k.to_string(), proxy.to_string()))
+        .collect()
 }
 
 /// 登录脚本探测统一走 `host`（市场安装与「插件菜单 → 登录」共用同一套判定）
@@ -191,18 +209,27 @@ pub async fn login(work_dir: &Path) -> anyhow::Result<String> {
     let script = detect_login_script(work_dir)
         .ok_or_else(|| anyhow::anyhow!("该插件未提供 login / log-in 脚本，无法完成登录"))?;
     let pnpm = crate::plugin::host::pnpm_bin();
-    run(pnpm, &["run", &script], Some(work_dir), LOGIN_TIMEOUT)
+    run(pnpm, &["run", &script], Some(work_dir), &proxy_envs(), LOGIN_TIMEOUT)
         .await
         .with_context(|| format!("登录失败（pnpm run {script}）"))?;
     Ok(script)
 }
 
-async fn run(cmd: &str, args: &[&str], cwd: Option<&Path>, timeout: Duration) -> anyhow::Result<std::process::Output> {
+async fn run(
+    cmd: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    envs: &[(String, String)],
+    timeout: Duration,
+) -> anyhow::Result<std::process::Output> {
     let mut c = tokio::process::Command::new(cmd);
     c.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in envs {
+        c.env(k, v);
+    }
     if let Some(dir) = cwd {
         c.current_dir(dir);
     }

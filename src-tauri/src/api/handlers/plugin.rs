@@ -5,6 +5,7 @@
 //! 强制插件方按新契约升级。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Json, Path, Query, State};
@@ -495,13 +496,24 @@ pub(crate) struct MarketSearchQuery {
 }
 
 /// GET /api/plugin-market/search
+///
+/// 总超时兜底：GitHub 在国内常被墙，直连会一直挂着，前端等不到反馈。
 pub(crate) async fn search_market_plugins(
     State(state): State<Arc<AppState>>,
     Query(q): Query<MarketSearchQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let items = crate::plugin::market::search(&state.http_client, q.force)
-        .await
-        .map_err(internal_err)?;
+    let items = tokio::time::timeout(
+        Duration::from_secs(25),
+        crate::plugin::market::search(&state.http_client, q.force),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "GitHub 搜索超时（请检查系统代理是否开启）"})),
+        )
+    })?
+    .map_err(internal_err)?;
     Ok(Json(serde_json::json!({ "items": items })))
 }
 

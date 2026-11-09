@@ -113,6 +113,8 @@ tiny-skia = "0.11"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    # 托盘图标：读 HKCU\...\Themes\Personalize 的系统托盘深浅色
+    "Win32_System_Registry",
     # splash：DComp 合成器驱动的环形旋转动画
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
