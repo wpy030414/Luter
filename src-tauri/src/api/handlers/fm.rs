@@ -214,6 +214,12 @@ impl FmEngine {
 
 // ── 播放线程 ────────────────────────────────────────────────────────────────
 
+/// 预加载缓存：绑定目标曲目索引，re-anchor 跳曲时按索引匹配。
+struct Preload {
+    index: usize,
+    rx: oneshot::Receiver<Vec<u8>>,
+}
+
 /// 引擎主循环：在专用 std::thread 中运行。
 ///
 /// 1. 创建 rodio OutputStream + Sink（线程生命周期内持续）
@@ -277,12 +283,6 @@ fn engine_loop(
         cum_start[idx],
         seed_offset
     );
-
-    // 预加载缓存：绑定目标曲目索引，re-anchor 跳曲时按索引匹配。
-    struct Preload {
-        index: usize,
-        rx: oneshot::Receiver<Vec<u8>>,
-    }
 
     // Radio 模式状态：
     // - paused=true：暂停（radio 静音），时间轴照走但 scene_t 冻结；
@@ -350,11 +350,15 @@ fn engine_loop(
         let bytes = match bytes {
             Some(b) => b,
             None => {
+                // 下载失败：仅快进一首，且**立刻**为其拉起预加载。
+                // 不这样做的话，下一轮会因为没有预加载而同步下载，再失败再快进——
+                // 每一次都完整重下，长跑后彻底表现为「点不动、标题乱闪」。
                 warn!(
-                    "FM track {} download failed, skipping",
+                    "FM track {} download failed, skipping to next",
                     track.netease_id
                 );
                 idx = (idx + 1) % TRACKS.len();
+                spawn_preload(&http_client, idx);
                 continue;
             }
         };
@@ -369,6 +373,7 @@ fn engine_loop(
                     track.netease_id, e
                 );
                 idx = (idx + 1) % TRACKS.len();
+                spawn_preload(&http_client, idx);
                 continue;
             }
         };
@@ -421,16 +426,7 @@ fn engine_loop(
         update_media_controls(&app_handle, track.artist, track.title);
 
         // 启动下一曲预加载（双缓冲：当前曲播放时后台下载下一曲）。
-        let next_idx = (idx + 1) % TRACKS.len();
-        let next_id = TRACKS[next_idx].netease_id;
-        let client = http_client.clone();
-        let (preload_tx, preload_rx) = oneshot::channel();
-        tauri::async_runtime::spawn(async move {
-            if let Some(bytes) = preload_track(&client, next_id).await {
-                let _ = preload_tx.send(bytes);
-            }
-        });
-        next_preload = Some(Preload { index: next_idx, rx: preload_rx });
+        next_preload = Some(spawn_preload(&http_client, (idx + 1) % TRACKS.len()));
 
         // ── 等待曲目结束 + 处理控制消息 ──
 
@@ -519,6 +515,22 @@ fn engine_loop(
         // 曲目结束 → 下一首（预加载已就绪，零等待）。
         idx = (idx + 1) % TRACKS.len();
         // 暂停期间切歌：音量保持 0，继续无声广播；播放中则按静音开关恢复音量。
+    }
+}
+
+/// 启动指定曲目的异步预加载（双缓冲 / 失败快进后补预加载共用）。
+fn spawn_preload(client: &reqwest::Client, index: usize) -> Preload {
+    let next_id = TRACKS[index % TRACKS.len()].netease_id;
+    let client = client.clone();
+    let (preload_tx, preload_rx) = oneshot::channel();
+    tauri::async_runtime::spawn(async move {
+        if let Some(bytes) = preload_track(&client, next_id).await {
+            let _ = preload_tx.send(bytes);
+        }
+    });
+    Preload {
+        index: index % TRACKS.len(),
+        rx: preload_rx,
     }
 }
 
@@ -657,11 +669,37 @@ fn seed_from_wallclock(now: u64, cum_start: &[u64]) -> usize {
     lo
 }
 
+/// 解析接口超时：paugram 一个 JSON 请求，正常 <1s。
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(8);
+/// 音频整体下载超时：与歌曲长度解耦的硬上限，防止坏连接把播放线程永久挂死。
+/// 整首 MP3（平均 3~5MB）在常规带宽下远低于此值；超时即放弃并快进下一首，
+/// 绝不允许一次失败让主人点好几次按钮。
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// 异步预加载：解析音源直链 + 下载完整 MP3 字节。
+///
+/// 两道超时缺一不可：`send()` 只覆盖到响应头，`bytes()` 才是真正的数据体传输。
+/// 不发超时的话，CDN / 代理让连接半死不活（头部到了、数据不来）时播放线程会
+/// 永远卡在 `blocking_recv()` 上，控制消息积压——表现为「点了没反应、标题乱闪」。
 async fn preload_track(client: &reqwest::Client, netease_id: u64) -> Option<Vec<u8>> {
     let src = resolve_src(client, netease_id).await?;
-    let bytes = client.get(&src).send().await.ok()?.bytes().await.ok()?;
+    let resp = client
+        .get(&src)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        warn!(
+            "FM track {} fetch returned HTTP {}",
+            netease_id,
+            resp.status()
+        );
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
     if bytes.is_empty() {
+        warn!("FM track {} download yielded empty body", netease_id);
         return None;
     }
     Some(bytes.to_vec())
@@ -674,14 +712,25 @@ fn fetch_track_sync(client: &reqwest::Client, netease_id: u64) -> Option<Vec<u8>
 }
 
 /// 解析音源直链：优先 paugram 解析接口，失败回退网易云官方外链。
+///
+/// 只信任 `served == true` 的直链；解析接口明确说「不可播放」时直接回退外链，
+/// 避免拿着一个注定 404 的 URL 去下载、再多耗一轮超时。
 async fn resolve_src(client: &reqwest::Client, id: u64) -> Option<String> {
     let paugram_url = format!("https://api.paugram.com/netease/?id={id}");
-    if let Ok(resp) = client.get(&paugram_url).send().await {
+    if let Ok(resp) = client
+        .get(&paugram_url)
+        .timeout(RESOLVE_TIMEOUT)
+        .send()
+        .await
+    {
         if resp.status().is_success() {
             if let Ok(data) = resp.json::<serde_json::Value>().await {
-                if let Some(link) = data.get("link").and_then(|l| l.as_str()) {
-                    if !link.is_empty() {
-                        return Some(link.to_string());
+                let served = data.get("served").and_then(|s| s.as_bool());
+                if served != Some(false) {
+                    if let Some(link) = data.get("link").and_then(|l| l.as_str()) {
+                        if !link.is_empty() {
+                            return Some(link.to_string());
+                        }
                     }
                 }
             }
