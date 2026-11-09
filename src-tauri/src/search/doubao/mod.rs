@@ -62,6 +62,21 @@ impl std::fmt::Display for DoubaoSearchError {
 
 impl std::error::Error for DoubaoSearchError {}
 
+/// 从 Cookie 头里取指定名字的值。
+fn cookie_value(header: &str, name: &str) -> Option<String> {
+    for part in header.split(';') {
+        let mut kv = part.trim().splitn(2, '=');
+        let (k, v) = (kv.next()?, kv.next()?);
+        if k.trim() == name {
+            let value = v.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn classify(code: Option<i64>, message: &str) -> DoubaoErrorKind {
     const RISK: [i64; 6] = [
         710022001, 710022002, 710022003, 710022004, 710022005, 710022006,
@@ -93,29 +108,62 @@ pub async fn search(ctx: &DoubaoSearchCtx<'_>, query: &str) -> anyhow::Result<Ve
     let prompt = protocol::build_search_prompt(query);
     let body = protocol::build_request_body(&prompt, preset, ctx.bot_id, &ctx.credential.device);
 
-    let url = format!(
-        "{}{}?aid={}&pc_version={}&language=zh&device_platform=web\
-         &doubao_device_platform=web&real_aid={}&pkg_type=release_version\
-         &device_id={}&web_id={}&region=CN&sys_region=CN&use-olympus-account=1",
+    // URL 参数逐字对齐 xrp-doubao 的 webParams：
+    // 缺 fp / web_tab_id / tz_name 会被上游判 common invalid param。
+    let mut url = format!(
+        "{}{}?aid={}&real_aid={}&device_id={}&tea_uuid={}&web_id={}\
+         &device_platform=web&doubao_device_platform=web\
+         &pc_version={}&doubao_pc_version={}&pkg_type=release_version\
+         &version_code=20800&language=zh&region=CN&sys_region=CN\
+         &samantha_web=1&web_platform=browser&use-olympus-account=1\
+         &fp={}&web_tab_id={}&tz_name=Asia%2FShanghai",
         ctx.base_url.trim_end_matches('/'),
         crate::search::config::DOUBAO_CHAT_PATH,
         ctx.aid,
-        ctx.pc_version,
         ctx.aid,
         ctx.credential.device.device_id,
         ctx.credential.device.web_id,
+        ctx.credential.device.web_id,
+        ctx.pc_version,
+        ctx.pc_version,
+        ctx.credential.device.fp,
+        protocol::uuid_like(),
     );
+    if let Some(ms_token) = cookie_value(&ctx.credential.cookie_header, "msToken") {
+        url.push_str("&msToken=");
+        url.push_str(&ms_token);
+    }
 
-    let response = ctx
+    let csrf =
+        cookie_value(&ctx.credential.cookie_header, "passport_csrf_token").unwrap_or_default();
+    let mut request = ctx
         .client
         .post(&url)
         .header("Cookie", &ctx.credential.cookie_header)
         .header("Accept", "text/event-stream")
+        .header("Accept-Language", "zh-CN,zh;q=0.9")
         .header("Content-Type", "application/json")
+        .header("Origin", ctx.base_url.trim_end_matches('/'))
         .header(
             "Referer",
             format!("{}/chat/", ctx.base_url.trim_end_matches('/')),
         )
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        )
+        .header("agw-js-conv", "str")
+        .header(
+            "sec-ch-ua",
+            "\"Chromium\";v=\"147\", \"Not.A/Brand\";v=\"8\"",
+        )
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", "\"Windows\"");
+    if !csrf.is_empty() {
+        request = request.header("x-tt-passport-csrf-token", csrf);
+    }
+    let response = request
         .json(&body)
         .timeout(SEARCH_TIMEOUT)
         .send()

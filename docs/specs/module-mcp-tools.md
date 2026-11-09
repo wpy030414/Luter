@@ -35,6 +35,8 @@
     - 走豆包网页端 `/chat/completion` SSE 逆向；**是否联网由模型意图决定**
       （`llm_intention=browsing`），无请求参数可强制，本引擎用 prompt 引导；
       未触发时返回空列表而非报错。
+    - **必须用 `doubao-fast`（快速模式）**：实测专家模式（`doubao-expert`）只作答、
+      不触发联网；快速模式带时效性问题时触发率最高。
     - 只取 `block_type=10025` 的 `search_query_result_block`：标题 + URL（无正文），
       `snippet` 留空，正文由 `content/` 层按 `url` 抓取补全。
     - **默认不参与 auto**：`search_doubao_enabled=1` 且**已登录**才进计划，

@@ -50,7 +50,8 @@ pub struct SearchConfig {
     pub doubao_pc_version: String,
     /// 豆包 bot id
     pub doubao_bot_id: String,
-    /// 搜索使用的模型别名（`doubao-expert` / `doubao-fast`）
+    /// 搜索使用的模型别名：`doubao-fast`（快速，会触发联网）/
+    /// `doubao-expert`（专家，实测不触发联网，仅作答）
     pub doubao_model: String,
 }
 
@@ -94,7 +95,8 @@ impl SearchConfig {
             doubao_model: get("search_doubao_model")
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "doubao-expert".to_string()),
+                // 实测：快速模式才会触发联网（专家模式只答不搜）
+                .unwrap_or_else(|| "doubao-fast".to_string()),
         }
     }
 

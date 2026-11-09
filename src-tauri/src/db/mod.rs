@@ -35,7 +35,6 @@ pub struct Database {
     readers: Arc<Vec<Mutex<Connection>>>,
     /// 读槽轮转指针。
     reader_cursor: Arc<std::sync::atomic::AtomicUsize>,
-    path: Option<std::path::PathBuf>,
 }
 
 /// 只读连接池槽位数。统计页刷新一次并发 2 个查询，加上偶尔的审计/配额读，
@@ -84,7 +83,6 @@ impl Database {
             conn: Arc::new(Mutex::new(conn)),
             readers: Arc::new(readers),
             reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            path: Some(path),
         })
     }
 
@@ -101,7 +99,6 @@ impl Database {
             conn: Arc::new(Mutex::new(conn)),
             readers: Arc::new(Vec::new()),
             reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            path: None,
         })
     }
 
@@ -543,7 +540,6 @@ mod tests {
             conn: Arc::new(Mutex::new(conn)),
             readers: Arc::new(Vec::new()),
             reader_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            path: None,
         };
 
         // 注入一条非法迁移，模拟历史上 V23 的解析失败。
