@@ -66,26 +66,37 @@ pub fn extract_chat_completions_usage(chunk: &Value) -> IrUsage {
 
     if let Some(u) = chunk.get("usage") {
         if let Some(pt) = u.get("prompt_tokens").and_then(|v| v.as_u64()) {
-            // 缓存命中字段统一处理
-            let cache_hit = u
+            // 缓存命中量可能来自三种字段，必须先剔除 0 值再合并：
+            // 部分网关（如 WorkBuddy）同时返回 `prompt_cache_hit_tokens: 0` 与
+            // `prompt_tokens_details.cached_tokens: N`，`Some(0)` 会让 or_else 短路。
+            let hit = u
                 .get("prompt_cache_hit_tokens")
                 .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
                 .or_else(|| {
                     u.get("prompt_tokens_details")
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
+                        .filter(|v| *v > 0)
                 });
+            // 上游自报的 cache_read：部分网关恒为 0，不能无条件采用（会覆盖命中量）
+            let reported_read = u
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0);
+            let cache_read = hit.unwrap_or(0).max(reported_read.unwrap_or(0));
 
-            if let Some(hit) = cache_hit {
-                usage.cache_read_input_tokens = hit;
-                if let Some(miss) = u
+            if cache_read > 0 {
+                usage.cache_read_input_tokens = cache_read;
+                // 没有 miss 字段时按 prompt_tokens - 命中量拆分，
+                // 保证 prompt_tokens 始终是「未命中」的互斥口径（UI 分母 = 未命中 + 命中）
+                usage.input_tokens = match u
                     .get("prompt_cache_miss_tokens")
                     .and_then(|v| v.as_u64())
                 {
-                    usage.input_tokens = miss;
-                } else {
-                    usage.input_tokens = pt.saturating_sub(hit);
-                }
+                    Some(miss) => miss,
+                    None => pt.saturating_sub(cache_read),
+                };
             } else {
                 usage.input_tokens = pt;
             }
@@ -93,12 +104,18 @@ pub fn extract_chat_completions_usage(chunk: &Value) -> IrUsage {
         if let Some(ct) = u.get("completion_tokens").and_then(|v| v.as_u64()) {
             usage.output_tokens = ct;
         }
-        // 透传上游自报的 cache_read（若有）
-        if let Some(cr) = u
-            .get("cache_read_input_tokens")
+        // 缓存写入量（Anthropic 的 cache_creation；网关也用它或 prompt_cache_write_tokens 表示）
+        if let Some(cc) = u
+            .get("cache_creation_input_tokens")
             .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                u.get("prompt_cache_write_tokens")
+                    .and_then(|v| v.as_u64())
+                    .filter(|v| *v > 0)
+            })
         {
-            usage.cache_read_input_tokens = cr;
+            usage.cache_creation_input_tokens = cc;
         }
     }
 
@@ -301,6 +318,78 @@ mod tests {
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.output_tokens, 50);
         assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    /// 回归：WorkBuddy 网关真实响应里 `cache_read_input_tokens` 恒为 0，
+    /// 命中量只出现在 prompt_cache_hit_tokens / prompt_tokens_details.cached_tokens。
+    /// 旧实现会无条件用 0 覆盖命中量 → Router 缓存命中率永远显示 0%。
+    #[test]
+    fn test_extract_chat_completions_usage_zero_cache_read_does_not_override() {
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 4450,
+                "completion_tokens": 1,
+                "total_tokens": 4451,
+                "prompt_cache_hit_tokens": 4224,
+                "prompt_cache_miss_tokens": 226,
+                "prompt_tokens_details": {"cached_tokens": 4224},
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "prompt_cache_write_tokens": 0
+            }
+        });
+        let u = extract_chat_completions_usage(&chunk);
+        assert_eq!(u.input_tokens, 226);
+        assert_eq!(u.cache_read_input_tokens, 4224);
+    }
+
+    /// 只给 cache_read_input_tokens 的上游也要能识别，并拆出互斥的未命中口径
+    #[test]
+    fn test_extract_chat_completions_usage_cache_read_only() {
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 10,
+                "cache_read_input_tokens": 800
+            }
+        });
+        let u = extract_chat_completions_usage(&chunk);
+        assert_eq!(u.input_tokens, 200);
+        assert_eq!(u.cache_read_input_tokens, 800);
+    }
+
+    /// 命中字段为 0 时不能被 or_else 短路，必须回退到 details.cached_tokens
+    #[test]
+    fn test_extract_chat_completions_usage_zero_hit_falls_back_to_details() {
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 0,
+                "prompt_tokens_details": {"cached_tokens": 400}
+            }
+        });
+        let u = extract_chat_completions_usage(&chunk);
+        assert_eq!(u.cache_read_input_tokens, 400);
+        assert_eq!(u.input_tokens, 100);
+    }
+
+    /// 缓存写入量：兼容 cache_creation_input_tokens 与 prompt_cache_write_tokens
+    #[test]
+    fn test_extract_chat_completions_usage_cache_creation() {
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 300,
+                "completion_tokens": 5,
+                "prompt_cache_write_tokens": 300
+            }
+        });
+        let u = extract_chat_completions_usage(&chunk);
+        assert_eq!(u.cache_creation_input_tokens, 300);
     }
 
     #[test]
