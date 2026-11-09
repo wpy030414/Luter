@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, Inbox, GripVertical, MoreVertical, Pencil, Trash2, ArrowUpDown, Check, Loader2, LogIn } from 'lucide-react';
+import { Plus, Inbox, GripVertical, MoreVertical, Pencil, Trash2, ArrowUpDown, Check, Loader2, LogIn, Play, Square } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -43,6 +43,7 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { useT } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { listen as tauriListen, isTauri } from '@/lib/tauri';
+import { AddProviderDialog } from '@/components/AddProviderDialog';
 
 /** 密钥健康状态颜色（与密钥页 STATUS_COLORS 一致） */
 const KEY_STATUS_COLORS: Record<string, string> = {
@@ -76,6 +77,8 @@ interface ProviderCardProps {
   onDelete: () => void;
   onToggleAutostart?: (next: boolean) => void;
   onLogin?: () => void;
+  /** 启动 / 停止插件网关；参数为当前是否在运行 */
+  onToggleRunning?: (running: boolean) => void;
 }
 
 function ProviderCard({
@@ -91,6 +94,7 @@ function ProviderCard({
   onDelete,
   onToggleAutostart,
   onLogin,
+  onToggleRunning,
 }: ProviderCardProps) {
   const t = useT();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -204,6 +208,27 @@ function ProviderCard({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          {/* 插件卡片：启停放在第一项（在线 = 显示停止） */}
+          {isPlugin && plugin && (
+            <DropdownMenuItem
+              onClick={() => onToggleRunning?.(!!pluginOnline)}
+              disabled={!plugin.work_dir || !hostingAvailable}
+              title={
+                !plugin.work_dir
+                  ? t('providers.plugin_hosting_no_workdir')
+                  : !hostingAvailable
+                  ? t('providers.plugin_hosting_no_runtime')
+                  : undefined
+              }
+            >
+              {pluginOnline ? (
+                <Square className="w-4 h-4 mr-2" />
+              ) : (
+                <Play className="w-4 h-4 mr-2" />
+              )}
+              {pluginOnline ? t('providers.plugin_stop') : t('providers.plugin_start')}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onClick={onEdit}>
             <Pencil className="w-4 h-4 mr-2" />
             {t('common.edit')}
@@ -274,6 +299,8 @@ export function ProvidersView() {
   const [sortMode, setSortMode] = useState(false);
   const [savingSort, setSavingSort] = useState(false);
   const [sortError, setSortError] = useState<string | null>(null);
+  // 「添加供应商」入口弹窗：BYOK（自填）/ 反向代理（插件市场）
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
 
   // 按供应商分组：模型 chips 与密钥方块
   const modelsByProvider = useMemo(() => {
@@ -348,30 +375,36 @@ export function ProvidersView() {
     };
   }, []);
 
+  // 插件状态刷新（在线状态 + 插件记录）：安装完成 / 启动 / 停止后复用
+  const refreshPlugins = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      const plugins = await pluginsApi.list();
+      const map: Record<string, boolean> = {};
+      const pmap: Record<string, PluginListItem> = {};
+      for (const p of plugins) {
+        if (p.provider_id) {
+          map[p.provider_id] = !!p.connected;
+          pmap[p.provider_id] = p;
+        }
+      }
+      setPluginOnlineMap(map);
+      setPluginMap(pmap);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // Load initial data
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
         await Promise.all([fetchProviders(), fetchKeys(), fetchModels()]);
+        await refreshPlugins();
 
-        // Load plugin statuses + hosting runtime
+        // hosting runtime（伴生启动前置条件）
         if (isTauri()) {
-          try {
-            const plugins = await pluginsApi.list();
-            const map: Record<string, boolean> = {};
-            const pmap: Record<string, PluginListItem> = {};
-            for (const p of plugins) {
-              if (p.provider_id) {
-                map[p.provider_id] = !!p.connected;
-                pmap[p.provider_id] = p;
-              }
-            }
-            setPluginOnlineMap(map);
-            setPluginMap(pmap);
-          } catch {
-            // ignore
-          }
           try {
             const rt = await pluginsApi.runtime();
             setHostingAvailable(!!(rt.node && rt.pnpm));
@@ -385,7 +418,7 @@ export function ProvidersView() {
     };
 
     load();
-  }, []);
+  }, [refreshPlugins]);
 
   // Drag and drop sensors
   const sensors = useSensors(
@@ -472,13 +505,47 @@ export function ProvidersView() {
     }
   };
 
+  /** 启动 / 停止插件网关（在线状态以 WS 连接为准） */
+  const handleToggleRunning = async (plugin: PluginListItem, running: boolean) => {
+    try {
+      if (running) {
+        await pluginsApi.stop(plugin.id);
+        showPluginNotice(t('providers.plugin_stopped'));
+        // WS 断开 → disconnect 回调是异步的，稍等再刷新在线状态
+        await new Promise((r) => setTimeout(r, 800));
+        await refreshPlugins();
+        return;
+      }
+      await pluginsApi.start(plugin.id);
+      showPluginNotice(t('providers.plugin_starting'));
+      // 重连注册会自动 re-enable provider（registry 的 existing 分支），
+      // 这里只需等到 WS 连上，无需再走 confirm
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const list = await pluginsApi.list();
+        if (list.find((p) => p.id === plugin.id)?.connected) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      await refreshPlugins();
+      void fetchProviders();
+    } catch (e: any) {
+      const raw = e?.message || String(e);
+      showPluginNotice(
+        raw.includes('not_hosted')
+          ? t('providers.plugin_stop_not_hosted')
+          : t('providers.plugin_toggle_failed', { msg: raw }),
+      );
+      await refreshPlugins();
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-start gap-4 flex-wrap">
         <h2 className="text-3xl font-normal m-0">{t('providers.title')}</h2>
         <div className="flex items-center gap-2.5">
           <Button
-            onClick={() => navigate('/providers/new')}
+            onClick={() => setAddDialogOpen(true)}
             disabled={sortMode}
           >
             <Plus className="w-4 h-4 mr-2" />
@@ -543,6 +610,9 @@ export function ProvidersView() {
                     onDelete={() => handleDelete(provider)}
                     onToggleAutostart={plugin ? (next) => handleToggleAutostart(plugin, next) : undefined}
                     onLogin={plugin ? () => handlePluginLogin(plugin) : undefined}
+                    onToggleRunning={
+                      plugin ? (running) => handleToggleRunning(plugin, running) : undefined
+                    }
                   />
                 );
               })}
@@ -569,6 +639,14 @@ export function ProvidersView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AddProviderDialog
+        open={addDialogOpen}
+        onOpenChange={setAddDialogOpen}
+        onInstalled={() => {
+          void fetchProviders();
+        }}
+      />
     </div>
   );
 }

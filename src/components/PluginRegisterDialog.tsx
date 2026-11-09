@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { useT } from '@/i18n';
 import { pluginsApi } from '@/lib/api';
 import { listen } from '@/lib/tauri';
+import { isAutoInstalling } from '@/lib/pluginAutoInstall';
 import {
   Dialog,
   DialogContent,
@@ -44,6 +45,13 @@ export function PluginRegisterDialog() {
   useEffect(() => {
     const unlistenPromise = listen<PluginRegisterPayload>('plugin-register', (payload) => {
       console.log('[Plugin] Register event:', payload);
+      // 插件市场一键安装：静默 confirm 启用，不打断用户
+      if (isAutoInstalling() && payload.plugin_id) {
+        pluginsApi.confirm(payload.plugin_id).catch((e) => {
+          console.error('[Plugin] auto confirm failed:', e);
+        });
+        return;
+      }
       setInfo(payload);
       setVisible(true);
     });

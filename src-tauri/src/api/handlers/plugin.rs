@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Json, Path, State};
+use axum::extract::{ConnectInfo, Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -425,8 +425,211 @@ pub(crate) async fn login_plugin(
         ));
     }
 
-    state.plugin_host.spawn_login(&id, &work_dir).map_err(internal_err)?;
+    // 脚本名由 host 按 package.json 自动判定（login / log-in）；缺脚本时这里返回 400
+    if let Err(e) = state.plugin_host.spawn_login(&id, &work_dir) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ));
+    }
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"status": "launched"}))))
+}
+
+/// POST /api/plugins/:id/serve —— 启动插件网关（幂等：已托管则直接返回）
+pub(crate) async fn start_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let record = state.plugins.get_plugin_record(&id).map_err(internal_err)?;
+    let work_dir = record
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let Some(work_dir) = work_dir else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "work_dir_missing"})),
+        ));
+    };
+
+    let rt = state.plugin_host.check_runtime(false).await;
+    if rt.node.is_none() || rt.pnpm.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "runtime_unavailable",
+                "node": rt.node,
+                "pnpm": rt.pnpm,
+            })),
+        ));
+    }
+
+    state.plugin_host.spawn_serve(&id, &work_dir).map_err(internal_err)?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"status": "starting"}))))
+}
+
+/// POST /api/plugins/:id/stop —— 停止 Router 托管的插件网关。
+///
+/// 只杀 Router 自己 spawn 的进程；用户手动启动的网关返回 409，
+/// 前端据此提示「请在外部停止」，不谎报成功。
+pub(crate) async fn stop_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let work_dir = state.plugins.get_plugin_record(&id).ok().and_then(|r| r.work_dir);
+    if !state.plugin_host.stop(&id, work_dir.as_deref()) {
+        return Err((StatusCode::CONFLICT, Json(serde_json::json!({"error": "not_hosted"}))));
+    }
+    Ok(Json(serde_json::json!({"status": "stopped"})))
+}
+
+// ── 插件市场（GitHub 搜索 + 一键安装） ──
+
+#[derive(Deserialize, Default)]
+pub(crate) struct MarketSearchQuery {
+    /// 跳过 30s 缓存，强制重查 GitHub
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// GET /api/plugin-market/search
+pub(crate) async fn search_market_plugins(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MarketSearchQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let items = crate::plugin::market::search(&state.http_client, q.force)
+        .await
+        .map_err(internal_err)?;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct InstallMarketPluginReq {
+    pub repo: String,
+}
+
+/// POST /api/plugin-market/install
+///
+/// clone + pnpm install 后立即 `pnpm run serve`；插件会按 V24 契约自行 WS 注册，
+/// 前端轮询 `/api/plugins` 拿到 plugin_id 后调用 confirm 完成启用。
+pub(crate) async fn install_market_plugin(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<InstallMarketPluginReq>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let rt = state.plugin_host.check_runtime(false).await;
+    if rt.node.is_none() || rt.pnpm.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "runtime_unavailable",
+                "node": rt.node,
+                "pnpm": rt.pnpm,
+            })),
+        ));
+    }
+
+    let out = crate::plugin::market::install(state.plugin_host.data_dir(), &req.repo)
+        .await
+        .map_err(internal_err)?;
+
+    // 托管键用目录名（插件真实 plugin_id 要等它注册后才可知，不能从仓库名推导：
+    // 如 xrp-cosy 注册的是 plugin-qwenwork）
+    let work_path = std::path::Path::new(&out.work_dir);
+    let key = work_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| out.repo.clone());
+
+    // 有登录脚本 → 交给前端下一步调 /api/plugin-market/login（登录成功后才 serve）；
+    // 没有登录脚本的插件才在这里直接拉起。
+    let login_script = crate::plugin::market::detect_login_script(work_path);
+    if login_script.is_none() {
+        state
+            .plugin_host
+            .spawn_serve(&key, &out.work_dir)
+            .map_err(internal_err)?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "repo": out.repo,
+        "work_dir": out.work_dir,
+        "login_script": login_script,
+        "status": if login_script.is_some() { "needs_login" } else { "starting" },
+    })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct MarketLoginReq {
+    pub work_dir: String,
+}
+
+/// POST /api/plugin-market/login
+///
+/// 插件网关没有凭证时照样监听端口、但所有推理请求都会 401，所以**必须登录后再 serve**。
+/// 登录是人工环节（扫码/账密），本请求会阻塞到登录完成，成功后立即拉起网关；
+/// 插件随后按 V24 契约自行 WS 注册。
+pub(crate) async fn login_market_plugin(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MarketLoginReq>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let work_dir = req.work_dir.trim();
+    if work_dir.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "work_dir_missing"})),
+        ));
+    }
+
+    // 安全边界：只允许操作 {data_dir}/plugins 下的目录，
+    // 防止把本接口当成「任意目录执行 pnpm run」的入口。
+    let root = state.plugin_host.data_dir().join("plugins");
+    let canon_root = root.canonicalize().unwrap_or(root);
+    let canon = std::path::Path::new(work_dir).canonicalize().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("work_dir_invalid: {e}")})),
+        )
+    })?;
+    if !canon.starts_with(&canon_root) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "work_dir_not_allowed"})),
+        ));
+    }
+
+    let rt = state.plugin_host.check_runtime(false).await;
+    if rt.node.is_none() || rt.pnpm.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "runtime_unavailable",
+                "node": rt.node,
+                "pnpm": rt.pnpm,
+            })),
+        ));
+    }
+
+    // 用原始路径执行（不用 canonicalize 结果）：Windows 的 `\\?\` 前缀会让
+    // 插件 process.cwd() 与前端记录的 work_dir 对不上，导致「等待注册」匹配失败。
+    let script = crate::plugin::market::login(std::path::Path::new(work_dir))
+        .await
+        .map_err(internal_err)?;
+
+    let key = std::path::Path::new(work_dir)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "plugin".to_string());
+    state
+        .plugin_host
+        .spawn_serve(&key, work_dir)
+        .map_err(internal_err)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "starting",
+        "login_script": script,
+    })))
 }
 
 fn internal_err(e: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {

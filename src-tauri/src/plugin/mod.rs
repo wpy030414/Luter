@@ -8,6 +8,7 @@
 
 pub mod health;
 pub mod host;
+pub mod market;
 pub mod registry;
 pub mod types;
 

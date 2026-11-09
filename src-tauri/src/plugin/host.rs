@@ -11,7 +11,7 @@
 //! - 前置条件：系统内 node 与 pnpm 可用，否则托管功能不可用。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
@@ -37,12 +37,16 @@ struct HostedChild {
     child: Option<tokio::process::Child>,
     #[allow(dead_code)]
     pid: Option<u32>,
+    /// 启动时的工作目录。市场安装用目录名做托管键，停止时要靠它反查。
+    work_dir: String,
 }
 
 /// 管理插件网关的进程生命周期。
 #[derive(Clone)]
 pub struct PluginProcessManager {
     db: Database,
+    /// 数据根目录（插件市场安装到 {data_dir}/plugins/）
+    data_dir: PathBuf,
     /// 日志目录：{data_dir}/logs/plugins/
     logs_dir: PathBuf,
     /// 只记录 Router 自己 spawn 的 serve 进程（plugin_id → child）
@@ -53,12 +57,19 @@ pub struct PluginProcessManager {
 
 impl PluginProcessManager {
     pub fn new(db: Database, data_dir: PathBuf) -> Self {
+        let logs_dir = data_dir.join("logs").join("plugins");
         Self {
             db,
-            logs_dir: data_dir.join("logs").join("plugins"),
+            data_dir,
+            logs_dir,
             running: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 数据根目录（插件市场安装到 {data_dir}/plugins/）
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
     }
 
     /// 探测系统内 node / pnpm 可用性（带进程内缓存；force 强制重探）。
@@ -87,28 +98,45 @@ impl PluginProcessManager {
                 .running
                 .lock()
                 .map_err(|e| anyhow::anyhow!("running map poisoned: {}", e))?;
-            if running.contains_key(plugin_id) {
-                info!(plugin = %plugin_id, "plugin gateway already hosted, skip spawn");
+            // 同 plugin_id 或同 work_dir 已托管都视为已启动：
+            // 市场安装用目录名（如 xrp-cosy）做键，注册后的 plugin_id 是 plugin-qwenwork，
+            // 只比 plugin_id 会重复拉起一个进程去抢同一端口。
+            let target = normalize_dir(work_dir);
+            if running.contains_key(plugin_id)
+                || running.values().any(|v| normalize_dir(&v.work_dir) == target)
+            {
+                info!(plugin = %plugin_id, work_dir = %work_dir, "plugin gateway already hosted, skip spawn");
                 return Ok(());
             }
         }
         let child = self.spawn_pnpm(plugin_id, work_dir, "serve")?;
         let pid = child.id();
         if let Ok(mut running) = self.running.lock() {
-            running.insert(plugin_id.to_string(), HostedChild { child: Some(child), pid });
+            running.insert(
+                plugin_id.to_string(),
+                HostedChild {
+                    child: Some(child),
+                    pid,
+                    work_dir: work_dir.to_string(),
+                },
+            );
         }
         info!(plugin = %plugin_id, work_dir = %work_dir, pid, "plugin serve process hosted");
         Ok(())
     }
 
-    /// `pnpm run login` 启动登录流程（fire-and-forget：login 是短命一次性进程，
-    /// 不入托管列表，后台 wait 收尸避免僵尸）。login 脚本契约自行弹系统浏览器。
+    /// 启动登录流程（fire-and-forget：login 是短命一次性进程，不入托管列表，
+    /// 后台 wait 收尸避免僵尸）。脚本名各插件不统一（`login` / `log-in`），
+    /// 按 package.json 实际提供者选择；两个都没有则直接报错，而不是让 pnpm
+    /// 报 `Missing script: login` 后静默退出。
     pub fn spawn_login(&self, plugin_id: &str, work_dir: &str) -> anyhow::Result<()> {
-        let mut child = self.spawn_pnpm(plugin_id, work_dir, "login")?;
+        let script = detect_login_script(Path::new(work_dir))
+            .ok_or_else(|| anyhow::anyhow!("该插件未提供 login / log-in 脚本"))?;
+        let mut child = self.spawn_pnpm(plugin_id, work_dir, &script)?;
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
-        info!(plugin = %plugin_id, work_dir = %work_dir, "plugin login process launched");
+        info!(plugin = %plugin_id, work_dir = %work_dir, script = %script, "plugin login process launched");
         Ok(())
     }
 
@@ -193,6 +221,37 @@ impl PluginProcessManager {
         }
     }
 
+    /// 停止插件：先按 plugin_id 命中的托管键，其次按 work_dir 反查。
+    ///
+    /// 市场安装时的托管键是目录名（如 `xrp-cosy`），与注册后的 plugin_id
+    /// （如 `plugin-qwenwork`）不同，只按 plugin_id 会杀不到。
+    /// 返回 false 表示该进程不在 Router 托管表里（用户手动启动的），
+    /// 需要提示用户到外部停止。
+    pub fn stop(&self, plugin_id: &str, work_dir: Option<&str>) -> bool {
+        let key = {
+            let Ok(running) = self.running.lock() else {
+                return false;
+            };
+            if running.contains_key(plugin_id) {
+                Some(plugin_id.to_string())
+            } else {
+                work_dir.map(normalize_dir).and_then(|target| {
+                    running
+                        .iter()
+                        .find(|(_, v)| normalize_dir(&v.work_dir) == target)
+                        .map(|(k, _)| k.clone())
+                })
+            }
+        };
+        match key {
+            Some(k) => {
+                self.kill(&k);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 退出时回收全部托管进程（RunEvent::Exit / 删除插件时调用）。
     /// 只杀 Router 自己 spawn 的——用户手动启动的网关不受影响。
     pub fn kill_all(&self) {
@@ -251,7 +310,27 @@ impl PluginProcessManager {
 }
 
 /// Windows 下 pnpm 是 .cmd 脚本，必须显式指名才能被 CreateProcess 找到。
-fn pnpm_bin() -> &'static str {
+/// 读 package.json 的 scripts，判断插件用的是 `login` 还是 `log-in`。
+///
+/// 命名不统一：`xrp-workbuddy` / `xrp-zcode` 是 `login`，
+/// `xrp-cosy` / `xrp-doubao` 是 `log-in`，因此两个都探测（`login` 优先）。
+pub fn detect_login_script(work_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(work_dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let scripts = v.get("scripts")?.as_object()?;
+    for key in ["login", "log-in"] {
+        if scripts
+            .get(key)
+            .and_then(|x| x.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Some(key.to_string());
+        }
+    }
+    None
+}
+
+pub(crate) fn pnpm_bin() -> &'static str {
     if cfg!(windows) { "pnpm.cmd" } else { "pnpm" }
 }
 
@@ -295,6 +374,11 @@ async fn probe_base_url(base_url: &str) -> bool {
     )
 }
 
+/// 目录路径归一化：Windows 大小写不敏感、正反斜杠混用，比较前统一。
+fn normalize_dir(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
 /// 击杀托管子进程：Windows taskkill /T /F（杀祖孙进程树——pnpm.cmd → cmd → node）；
 /// unix kill -9 -- -pgid（负 pid 杀整个进程组，fallback 单 pid）。
 /// 最后 start_kill() 兜底（句柄仍有效时）。
@@ -319,4 +403,38 @@ fn kill_child(child: tokio::process::Child) {
     // taskkill / kill 失败时用句柄直接杀（无 /T，可能残留孙进程，最后手段）
     let mut child = child;
     let _ = child.start_kill();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 各插件登录脚本命名不统一：workbuddy/zcode 用 login，cosy/doubao 用 log-in
+    #[test]
+    fn detect_login_script_recognizes_both_names() {
+        let dir = std::env::temp_dir().join(format!("xrl-login-detect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |scripts: &str| {
+            std::fs::write(dir.join("package.json"), format!(r#"{{"scripts":{scripts}}}"#)).unwrap();
+        };
+
+        write(r#"{"login":"tsx scripts/login.ts"}"#);
+        assert_eq!(detect_login_script(&dir).as_deref(), Some("login"));
+
+        write(r#"{"log-in":"tsx scripts/log-in.ts"}"#);
+        assert_eq!(detect_login_script(&dir).as_deref(), Some("log-in"));
+
+        // 两者都有时优先 login
+        write(r#"{"login":"tsx a.ts","log-in":"tsx b.ts"}"#);
+        assert_eq!(detect_login_script(&dir).as_deref(), Some("login"));
+
+        write(r#"{"serve":"tsx src/index.ts"}"#);
+        assert_eq!(detect_login_script(&dir), None);
+
+        // 空脚本视为未实现
+        write(r#"{"login":"   "}"#);
+        assert_eq!(detect_login_script(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

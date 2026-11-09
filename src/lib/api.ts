@@ -409,7 +409,49 @@ export const pluginsApi = {
     }),
   confirm: (pluginId: string) => request<{ status: string }>(`/api/plugins/${pluginId}/confirm`, { method: 'POST' }),
   login: (pluginId: string) => request<{ status: string }>(`/api/plugins/${pluginId}/login`, { method: 'POST' }),
+  /** 启动 Router 托管的插件网关（幂等） */
+  start: (pluginId: string) => request<{ status: string }>(`/api/plugins/${pluginId}/serve`, { method: 'POST' }),
+  /** 停止插件网关；非 Router 托管的进程返回 409 not_hosted */
+  stop: (pluginId: string) => request<{ status: string }>(`/api/plugins/${pluginId}/stop`, { method: 'POST' }),
   remove: (pluginId: string) => request<{ status: string }>(`/api/plugins/${pluginId}`, { method: 'DELETE' }),
+};
+
+// --- 插件市场（GitHub 上 wpy030414/xrp-* 反代插件）---
+export interface MarketPlugin {
+  repo: string;
+  display_name: string;
+  description: string;
+  html_url: string;
+  pushed_at: string;
+  default_branch: string;
+}
+
+export interface MarketInstallResult {
+  repo: string;
+  work_dir: string;
+  /** 登录脚本名（login / log-in）；null = 该插件无登录脚本，后端已直接拉起 */
+  login_script: string | null;
+  status: string;
+}
+
+export interface MarketLoginResult {
+  status: string;
+  login_script: string;
+}
+
+export const marketApi = {
+  /** 搜索插件仓库（后端 30s 缓存，force 强制重查） */
+  search: (force = false) =>
+    request<{ items: MarketPlugin[] }>(`/api/plugin-market/search${force ? '?force=true' : ''}`),
+  /** 下载 + pnpm install；有登录脚本时返回 needs_login，由下一步走 login */
+  install: (repo: string) =>
+    request<MarketInstallResult>('/api/plugin-market/install', { method: 'POST', body: { repo } }),
+  /** 跑 login/log-in（阻塞到浏览器登录完成），成功后后端自动拉起网关 */
+  login: (workDir: string) =>
+    request<MarketLoginResult>('/api/plugin-market/login', {
+      method: 'POST',
+      body: { work_dir: workDir },
+    }),
 };
 
 // --- Local Models（私有化：GGUF 权重 + llama-server 引擎）---

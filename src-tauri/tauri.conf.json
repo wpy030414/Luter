@@ -1,6 +1,6 @@
 {
   "productName": "Luter",
-  "version": "26.11.7",
+  "version": "26.11.9",
   "identifier": "im.xrl.router",
   "build": {
     "beforeDevCommand": "pnpm exec vp dev",

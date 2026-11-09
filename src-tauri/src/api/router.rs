@@ -187,6 +187,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/:id", get(handlers::get_plugin).patch(handlers::update_plugin).delete(handlers::delete_plugin))
         .route("/api/plugins/:id/confirm", post(handlers::confirm_plugin))
         .route("/api/plugins/:id/login", post(handlers::login_plugin))
+        .route("/api/plugins/:id/serve", post(handlers::start_plugin))
+        .route("/api/plugins/:id/stop", post(handlers::stop_plugin))
+        // 插件市场：GitHub 搜索 + 一键安装（install → login → serve，插件自行 WS 注册）
+        .route("/api/plugin-market/search", get(handlers::search_market_plugins))
+        .route("/api/plugin-market/install", post(handlers::install_market_plugin))
+        .route("/api/plugin-market/login", post(handlers::login_market_plugin))
         // 本机局域网 IP 查询（供 UI 拼分发链接）
         .route("/api/install/local-ip", get(handlers::get_local_ip))
         // 本地模型（私有化）：GGUF 权重导入 + 引擎管理
